@@ -12,10 +12,9 @@
 ```bash
 cd ~/chimera-daemon
 pip install -e ".[dev]"
-chimera --help
+chimera init
 chimera serve --dev
 pytest tests/ -v
-ruff check src/ && mypy src/
 ```
 
 ## Architecture
@@ -23,180 +22,186 @@ ruff check src/ && mypy src/
 ```
 chimera-daemon/
 ├── src/chimera/
-│   ├── __init__.py
-│   ├── cli.py              # CLI (click)
 │   ├── daemon.py           # Main orchestrator
+│   ├── cli.py              # CLI (click)
 │   ├── config.py           # Configuration
-│   ├── watcher.py          # File watcher (watchdog)
-│   ├── queue.py            # Job queue (asyncio+SQLite)
+│   ├── watcher.py          # File watcher
+│   ├── queue.py            # Job queue
 │   ├── api/                # FastAPI server
-│   ├── extractors/
-│   │   ├── base.py         # Base extractor
-│   │   ├── registry.py     # Extractor registry
-│   │   ├── document.py     # PDF, DOCX, MD, TXT, HTML
-│   │   ├── code.py         # Python, JS, TS, YAML, JSON
-│   │   ├── image.py        # OCR (Tesseract)
-│   │   ├── fae.py          # AI exports (Claude, ChatGPT)
+│   ├── extractors/         # Content extraction
+│   │   ├── pipeline.py     # Extraction orchestrator
+│   │   ├── document.py     # PDF, DOCX, MD, TXT
+│   │   ├── code.py         # Python, JS, YAML
+│   │   ├── fae.py          # AI conversation exports
 │   │   ├── chunker.py      # Text/code chunking
 │   │   ├── embeddings.py   # sentence-transformers
-│   │   ├── entities.py     # spaCy NER
-│   │   └── pipeline.py     # Extraction orchestrator
+│   │   └── entities.py     # spaCy NER
 │   ├── storage/
-│   │   ├── catalog.py      # SQLite (full schema)
+│   │   ├── catalog.py      # SQLite
 │   │   └── vectors.py      # ChromaDB
-│   ├── correlation/        # Sprint 3
+│   ├── correlation/        # Intelligence layer
+│   │   ├── engine.py       # Main orchestrator
+│   │   ├── entities.py     # Entity consolidation
+│   │   ├── patterns.py     # Pattern detection
+│   │   └── discovery.py    # Unknown knowns surfacing
 │   └── utils/
-├── tests/
-├── deploy/
-└── pyproject.toml
+└── tests/
 ```
 
-## Current Sprint: 2 — Extractors & Index
+## Current Sprint: 3 — Correlation Engine
 
-**Goal**: Document/code extraction, embeddings, entities  
+**Goal**: Cross-source correlation, pattern detection, discoveries  
 **Status**: ✅ COMPLETE
 
 ## Task Board
 
-### Sprint 2 - Done
-- [x] S2-01: SQLite schema (full PRD spec)
-- [x] S2-02: File catalog manager
-- [x] S2-03: Base extractor interface
-- [x] S2-04: PDF extractor (pypdf)
-- [x] S2-05: DOCX extractor (python-docx)
-- [x] S2-06: MD/TXT/HTML extractors
-- [x] S2-07: Python extractor (AST)
-- [x] S2-08: JS/TS/YAML/JSON extractors
-- [x] S2-09: Image extractor (Tesseract OCR)
-- [x] S2-10: Extractor registry
-- [x] S2-11: Text chunker (500-1000 tokens)
-- [x] S2-12: Code chunker (by functions/classes)
-- [x] S2-13: Embedding generator (sentence-transformers)
-- [x] S2-14: Entity extractor (spaCy + tech patterns)
-- [x] S2-15: ChromaDB setup
-- [x] S2-16: Extraction pipeline orchestrator
-- [x] S2-17: Daemon integration
-- [x] S2-18: FAE parsers (Claude, ChatGPT)
-- [x] S2-19: Extractor tests
-- [x] S2-20: Storage tests
-- [x] S2-21: FAE tests
+### Sprint 3 - Done
+- [x] S3-01: Entity consolidation (merge variants)
+- [x] S3-02: Co-occurrence matrix
+- [x] S3-03: Expertise detector (domain vocabulary)
+- [x] S3-04: Relationship detector (PERSON + ORG/PROJECT)
+- [x] S3-05: Workflow detector (naming patterns)
+- [x] S3-06: Tech stack detector
+- [x] S3-07: Confidence scoring algorithm
+- [x] S3-08: Unknown knowns surfacer
+- [x] S3-09: Discoveries storage
+- [x] S3-10: Confirm/dismiss feedback
+- [x] S3-11: Graph node export for SIF
+- [x] S3-12: API endpoints for discoveries
+- [x] S3-13: Correlation tests
 
-### Sprint 3 - Up Next
-- [ ] S3-01: Entity consolidation
-- [ ] S3-02: Co-occurrence matrix
-- [ ] S3-03: Expertise detector
-- [ ] S3-04: Relationship detector
-- [ ] S3-05: Confidence scoring
-- [ ] S3-06: Unknown knowns surfacer
-- [ ] S3-07: Discoveries storage
+### Sprint 4 - Up Next
+- [ ] S4-01: Full semantic search API
+- [ ] S4-02: CLI query command
+- [ ] S4-03: CLI discoveries commands
+- [ ] S4-04: Graph sync to sif-knowledge-base
+- [ ] S4-05: Claude Code integration
 
-## Sprint 2 Acceptance Criteria
+## Correlation Engine Flow
+
+```
+Indexed Content (SQLite + ChromaDB)
+    │
+    ▼
+┌───────────────────────────────┐
+│  ENTITY CONSOLIDATION        │
+│  "Gabriel" + "Gabe" → gabriel│
+└─────────────┬─────────────────┘
+              │
+              ▼
+┌───────────────────────────────┐
+│  CO-OCCURRENCE MATRIX        │
+│  Which entities appear together│
+└─────────────┬─────────────────┘
+              │
+              ▼
+┌───────────────────────────────┐
+│  PATTERN DETECTION           │
+│  • Expertise (domain vocab)  │
+│  • Relationships (co-occur)  │
+│  • Workflows (naming)        │
+│  • Tech stack                │
+└─────────────┬─────────────────┘
+              │
+              ▼
+┌───────────────────────────────┐
+│  DISCOVERY SURFACING         │
+│  confidence >= 0.7           │
+│  sources >= 2                │
+│  NOT explicitly stated       │
+└─────────────┬─────────────────┘
+              │
+              ▼
+       💡 DISCOVERIES
+       (Unknown Knowns)
+```
+
+## Confidence Algorithm
+
+```python
+confidence = (
+    0.35 * evidence_score +      # log10(count + 1) / 2
+    0.25 * diversity_score +     # sources / 5
+    0.20 * time_score +          # days_span / 365
+    0.20 * recency_score         # 1 - (days_since_last / 180)
+)
+```
+
+## Discovery Types
+
+| Type | Detection Method |
+|------|------------------|
+| **expertise** | Domain vocabulary density (ML, DevOps, medical...) |
+| **relationship** | PERSON + ORG/PROJECT co-occurrence |
+| **workflow** | File naming patterns (date prefix, versioning) |
+| **skill** | Tech stack profile across files |
+
+## API Endpoints (Sprint 3)
+
+```
+GET  /api/v1/query?q=...           # Semantic search
+GET  /api/v1/file/{id}             # File details + entities
+GET  /api/v1/discoveries           # List discoveries
+GET  /api/v1/discoveries/{id}      # Discovery details
+POST /api/v1/discoveries/{id}/feedback  # Confirm/dismiss
+GET  /api/v1/entities              # List consolidated entities
+GET  /api/v1/patterns              # List detected patterns
+POST /api/v1/correlate             # Queue correlation job
+POST /api/v1/correlate/run         # Run correlation now
+GET  /api/v1/correlation/stats     # Correlation statistics
+```
+
+## Usage Examples
 
 ```bash
-# Start daemon
-chimera serve --dev &
+# Run correlation
+curl -X POST localhost:7777/api/v1/correlate/run
 
-# Process a file
-curl -X POST localhost:7777/api/v1/excavate
+# Get discoveries
+curl localhost:7777/api/v1/discoveries
 
-# Check status - should show indexed files
-chimera status
+# Confirm a discovery
+curl -X POST localhost:7777/api/v1/discoveries/disc_001/feedback \
+  -d '{"action": "confirm", "notes": "Accurate"}'
 
-# Query (returns chunks)
-curl "localhost:7777/api/v1/query?q=test"
+# Search
+curl "localhost:7777/api/v1/query?q=thermal+control"
 
-# >= 50 docs/minute extraction rate
-```
-
-## Extraction Pipeline Flow
-
-```
-File Detected
-    │
-    ▼
-Job Queue (SQLite)
-    │
-    ▼
-Extractor Registry → Get extractor by extension
-    │
-    ▼
-Extract Content (PDF/DOCX/code/image)
-    │
-    ▼
-Chunk (500-1000 tokens, semantic boundaries)
-    │
-    ▼
-Extract Entities (spaCy + tech patterns)
-    │
-    ▼
-Generate Embeddings (sentence-transformers, 384d)
-    │
-    ▼
-Store (SQLite catalog + ChromaDB vectors)
-```
-
-## Supported File Types
-
-| Type | Extensions | Extractor |
-|------|------------|----------|
-| Documents | pdf, docx, md, txt, html | document.py |
-| Code | py, js, ts, jsx, tsx, yaml, json | code.py |
-| Images | png, jpg, gif, bmp, tiff | image.py (OCR) |
-| AI Exports | conversations.json | fae.py |
-
-## Key Components
-
-### ExtractionPipeline
-```python
-from chimera.extractors.pipeline import get_pipeline
-
-pipeline = get_pipeline()
-result = await pipeline.process_file(Path("document.pdf"))
-print(f"Chunks: {result.chunk_count}, Entities: {result.entity_count}")
-```
-
-### CatalogDB
-```python
-from chimera.storage.catalog import CatalogDB
-
-catalog = CatalogDB()
-stats = catalog.get_stats()
-print(f"Total files: {stats['total_files']}")
-```
-
-### VectorDB
-```python
-from chimera.storage.vectors import VectorDB
-
-vectors = VectorDB()
-results = vectors.query_text("documents", "thermal control")
+# Get correlation stats
+curl localhost:7777/api/v1/correlation/stats
 ```
 
 ## Session Log
 
-### 2026-01-05 — Session 1 (Sprint 0)
-- Created repository structure
-- Set up pyproject.toml, CI, Docker
+### 2026-01-05 — Sprint 0
+- Repository structure, CI/CD, Docker
 
-### 2026-01-05 — Session 2 (Sprint 1)
-- Full daemon orchestrator
-- File watcher, job queue, API server
-- CLI commands
+### 2026-01-05 — Sprint 1
+- Daemon, watcher, queue, API server
 
-### 2026-01-05 — Session 3 (Sprint 2)
-- Complete extraction pipeline
-- All document/code/image extractors
-- Chunking, embeddings, entity extraction
+### 2026-01-05 — Sprint 2
+- Extraction pipeline, all extractors
+- Chunking, embeddings, entities
 - SQLite + ChromaDB storage
-- FAE parsers for Claude & ChatGPT
-- Full test coverage
 
-## Links
+### 2026-01-05 — Sprint 3
+- Entity consolidation with alias resolution
+- Co-occurrence matrix for relationships
+- Pattern detection: expertise, relationships, workflow, tech stack
+- Discovery surfacing with confidence scoring
+- Confirm/dismiss feedback system
+- Graph node export for SIF integration
+- Full API for discoveries and patterns
 
-- **PRD**: https://github.com/Dshamir/sif-knowledge-base/tree/main/projects/chimera-prd
-- **A7.2 FAE**: https://github.com/Dshamir/sif-knowledge-base/blob/main/amendments/A7.2-full-archaeology-excavation-protocol.md
-- **SIF Knowledge Base**: https://github.com/Dshamir/sif-knowledge-base
+## Key Decisions
+
+| Date | Decision | Rationale |
+|------|----------|----------|
+| 2026-01-05 | Name aliases | Consolidate Mike/Michael, Bob/Robert |
+| 2026-01-05 | Domain vocab | 6 domains with 10-15 terms each |
+| 2026-01-05 | 0.7 confidence | Threshold for unknown knowns |
+| 2026-01-05 | 2+ sources | Multi-source requirement |
 
 ---
 
-*"We do this right or we don't do it."*
+*"Surface what you know but don't know you know."*
