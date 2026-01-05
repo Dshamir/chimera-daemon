@@ -1,0 +1,89 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chimera-daemon"
+version = "0.1.0"
+description = "CHIMERA: Cognitive History Integration & Memory Extraction Runtime Agent"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Daniel Shamir"}
+]
+keywords = ["ai", "memory", "cognitive", "archaeology", "extraction"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "httpx>=0.26.0",
+    "click>=8.1.0",
+    "rich>=13.7.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "pyyaml>=6.0.1",
+    "watchdog>=3.0.0",
+    "aiosqlite>=0.19.0",
+    "chromadb>=0.4.22",
+    "sentence-transformers>=2.2.2",
+    "spacy>=3.7.0",
+    "pypdf>=3.17.0",
+    "python-docx>=1.1.0",
+    "beautifulsoup4>=4.12.0",
+    "pillow>=10.2.0",
+    "pytesseract>=0.3.10",
+    "python-magic-bin>=0.4.14;sys_platform=='win32'",
+    "python-magic>=0.4.27;sys_platform!='win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+    "mypy>=1.8.0",
+    "types-PyYAML>=6.0.0",
+    "types-beautifulsoup4>=4.12.0",
+]
+
+[project.scripts]
+chimera = "chimera.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Dshamir/chimera-daemon"
+Repository = "https://github.com/Dshamir/chimera-daemon"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_ignores = true
