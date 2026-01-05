@@ -1,0 +1,29 @@
+[Unit]
+Description=CHIMERA Daemon - Cognitive Archaeology Agent
+After=network.target
+Documentation=https://github.com/Dshamir/chimera-daemon
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=/home/%i
+ExecStart=/home/%i/.local/bin/chimerad --host 127.0.0.1 --port 7777
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=chimera
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/%i/.chimera
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
