@@ -6,6 +6,7 @@ Coordinates the full extraction process:
 3. Extract entities
 4. Generate embeddings
 5. Store results
+
 """
 
 from dataclasses import dataclass
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 @dataclass
 class PipelineResult:
     """Result of pipeline processing."""
-    file_path: Path
+    file_path: str
     file_id: str
     success: bool = True
     error: str | None = None
@@ -64,13 +65,17 @@ class ExtractionPipeline:
         self.text_chunker = TextChunker()
         self.code_chunker = CodeChunker()
     
-    async def process_file(self, file_path: Path) -> PipelineResult:
+    async def process_file(self, file_path: str | Path) -> PipelineResult:
         """Process a single file through the extraction pipeline."""
         import time
         start_time = time.time()
         
+        # Ensure Path object
+        if isinstance(file_path, str):
+            file_path = Path(file_path)
+        
         file_id = generate_id("file", str(file_path))
-        result = PipelineResult(file_path=file_path, file_id=file_id)
+        result = PipelineResult(file_path=str(file_path), file_id=file_id)
         
         try:
             # Step 1: Get extractor
