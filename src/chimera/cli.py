@@ -1,12 +1,16 @@
 """CHIMERA CLI entry point."""
 
+import json
 import sys
 from pathlib import Path
 
 import click
 import httpx
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
+from rich.syntax import Syntax
+from rich.markdown import Markdown
 
 from chimera import __version__
 from chimera.config import ensure_config_dir, get_default_config, load_config, save_config
@@ -20,7 +24,7 @@ def api_request(method: str, endpoint: str, **kwargs) -> dict | None:
     """Make API request to daemon."""
     url = f"{DEFAULT_API_URL}{endpoint}"
     try:
-        response = httpx.request(method, url, timeout=10, **kwargs)
+        response = httpx.request(method, url, timeout=30, **kwargs)
         return response.json()
     except httpx.ConnectError:
         return None
@@ -34,7 +38,7 @@ def api_request(method: str, endpoint: str, **kwargs) -> dict | None:
 def main() -> None:
     """CHIMERA: Cognitive History Integration & Memory Extraction Runtime Agent.
     
-    Surface what you know but don't know you know — automatically, continuously, sovereignly.
+    Surface what you know but don't know you know.
     """
     pass
 
@@ -69,29 +73,37 @@ def status() -> None:
         console.print(f"[red]{result['error']}[/red]")
         return
     
-    console.print("[bold green]CHIMERA Status[/bold green]")
-    console.print("─" * 50)
+    console.print(Panel.fit("[bold green]CHIMERA Status[/bold green]", border_style="green"))
     
-    table = Table(show_header=False, box=None)
+    table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="cyan")
     table.add_column("Value")
     
     table.add_row("Version", result.get("version", "unknown"))
     table.add_row("Running", "✅" if result.get("running") else "❌")
-    table.add_row("Uptime", f"{result.get('uptime_seconds', 0):.1f}s")
-    table.add_row("Dev Mode", "✅" if result.get("dev_mode") else "❌")
+    
+    uptime = result.get('uptime_seconds', 0)
+    if uptime > 3600:
+        uptime_str = f"{uptime/3600:.1f}h"
+    elif uptime > 60:
+        uptime_str = f"{uptime/60:.1f}m"
+    else:
+        uptime_str = f"{uptime:.0f}s"
+    table.add_row("Uptime", uptime_str)
     
     stats = result.get("stats", {})
     table.add_row("", "")
-    table.add_row("Files Detected", str(stats.get("files_detected", 0)))
-    table.add_row("Jobs Processed", str(stats.get("jobs_processed", 0)))
-    table.add_row("Jobs Failed", str(stats.get("jobs_failed", 0)))
+    table.add_row("📁 Files Indexed", str(stats.get("files_indexed", 0)))
+    table.add_row("📊 Jobs Processed", str(stats.get("jobs_processed", 0)))
+    table.add_row("🔗 Correlations Run", str(stats.get("correlations_run", 0)))
+    table.add_row("💡 Discoveries", str(stats.get("discoveries_surfaced", 0)))
     
-    config = result.get("config", {})
-    table.add_row("", "")
-    table.add_row("Sources", str(config.get("sources", 0)))
-    table.add_row("FAE Enabled", "✅" if config.get("fae_enabled") else "❌")
-    table.add_row("API Port", str(config.get("api_port", 7777)))
+    catalog = result.get("catalog", {})
+    if catalog:
+        table.add_row("", "")
+        table.add_row("🗄️  Total Files", str(catalog.get("total_files", 0)))
+        table.add_row("🧩 Total Chunks", str(catalog.get("total_chunks", 0)))
+        table.add_row("🏷️  Total Entities", str(catalog.get("total_entities", 0)))
     
     console.print(table)
 
@@ -114,62 +126,269 @@ def health() -> None:
 @main.command()
 @click.argument("query_text")
 @click.option("--limit", "-n", default=10, help="Maximum results")
-def query(query_text: str, limit: int) -> None:
+@click.option("--min-score", default=0.5, help="Minimum similarity score")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def query(query_text: str, limit: int, min_score: float, as_json: bool) -> None:
     """Search the knowledge base with natural language."""
-    result = api_request("GET", f"/api/v1/query?q={query_text}&limit={limit}")
+    result = api_request("GET", f"/api/v1/query?q={query_text}&limit={limit}&min_confidence={min_score}")
     
     if result is None:
         console.print("[red]Daemon not running. Start with: chimera serve[/red]")
         return
     
-    if result.get("message"):
-        console.print(f"[yellow]{result['message']}[/yellow]")
+    if as_json:
+        console.print(json.dumps(result, indent=2))
+        return
     
     results = result.get("results", [])
-    if results:
-        console.print(f"\n[bold]Results for: {query_text}[/bold]")
-        for i, r in enumerate(results, 1):
-            console.print(f"  {i}. {r}")
+    if not results:
+        console.print(f"[yellow]No results for: {query_text}[/yellow]")
+        return
+    
+    console.print(Panel.fit(f"[bold]Results for: {query_text}[/bold]", border_style="blue"))
+    
+    for i, r in enumerate(results, 1):
+        similarity = r.get("similarity", 0)
+        file_path = r.get("file_path", "unknown")
+        content = r.get("content", "")[:200]
+        
+        # Color based on similarity
+        if similarity >= 0.8:
+            score_color = "green"
+        elif similarity >= 0.6:
+            score_color = "yellow"
+        else:
+            score_color = "dim"
+        
+        console.print(f"\n[{score_color}]{i}. [{similarity:.2f}][/{score_color}] [cyan]{Path(file_path).name}[/cyan]")
+        console.print(f"   [dim]{file_path}[/dim]")
+        console.print(f"   {content}..." if len(content) == 200 else f"   {content}")
+
+
+@main.command()
+@click.option("--type", "discovery_type", help="Filter by type (expertise, relationship, workflow, skill)")
+@click.option("--min-confidence", default=0.7, help="Minimum confidence threshold")
+@click.option("--status", "filter_status", type=click.Choice(["active", "confirmed", "dismissed", "all"]), default="active")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def discoveries(discovery_type: str | None, min_confidence: float, filter_status: str, as_json: bool) -> None:
+    """List surfaced discoveries (unknown knowns)."""
+    params = f"min_confidence={min_confidence}"
+    if discovery_type:
+        params += f"&discovery_type={discovery_type}"
+    if filter_status and filter_status != "all":
+        params += f"&status={filter_status}"
+    
+    result = api_request("GET", f"/api/v1/discoveries?{params}")
+    
+    if result is None:
+        console.print("[red]Daemon not running. Start with: chimera serve[/red]")
+        return
+    
+    if as_json:
+        console.print(json.dumps(result, indent=2))
+        return
+    
+    discoveries_list = result.get("discoveries", [])
+    if not discoveries_list:
+        console.print("[yellow]No discoveries found. Run correlation first: chimera correlate[/yellow]")
+        return
+    
+    console.print(Panel.fit(f"[bold]💡 Discoveries ({len(discoveries_list)})[/bold]", border_style="yellow"))
+    
+    # Group by type
+    by_type = {}
+    for d in discoveries_list:
+        dt = d.get("discovery_type", "unknown")
+        if dt not in by_type:
+            by_type[dt] = []
+        by_type[dt].append(d)
+    
+    type_icons = {
+        "expertise": "🎯",
+        "relationship": "🔗",
+        "workflow": "📁",
+        "skill": "🛠️",
+    }
+    
+    for dtype, items in by_type.items():
+        icon = type_icons.get(dtype, "💡")
+        console.print(f"\n{icon} [bold cyan]{dtype.upper()}[/bold cyan]")
+        
+        for d in items:
+            conf = d.get("confidence", 0)
+            title = d.get("title", "Untitled")
+            desc = d.get("description", "")
+            disc_id = d.get("id", "")
+            status = d.get("status", "active")
+            
+            status_icon = {"active": "🟡", "confirmed": "✅", "dismissed": "❌"}.get(status, "❓")
+            
+            if conf >= 0.9:
+                conf_color = "green bold"
+            elif conf >= 0.7:
+                conf_color = "green"
+            else:
+                conf_color = "yellow"
+            
+            console.print(f"  {status_icon} [{conf_color}][{conf:.0%}][/{conf_color}] {title}")
+            console.print(f"     [dim]{desc}[/dim]")
+            console.print(f"     [dim]ID: {disc_id}[/dim]")
+
+
+@main.command()
+@click.argument("discovery_id")
+@click.option("--action", type=click.Choice(["confirm", "dismiss"]), required=True)
+@click.option("--notes", help="Optional feedback notes")
+def feedback(discovery_id: str, action: str, notes: str | None) -> None:
+    """Provide feedback on a discovery."""
+    result = api_request("POST", f"/api/v1/discoveries/{discovery_id}/feedback", json={
+        "action": action,
+        "notes": notes,
+    })
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    if result.get("success"):
+        icon = "✅" if action == "confirm" else "❌"
+        console.print(f"{icon} Discovery {action}ed: {discovery_id}")
     else:
-        console.print("No results found.")
+        console.print(f"[red]Failed: {result.get('error', 'Unknown error')}[/red]")
+
+
+@main.command()
+@click.option("--type", "entity_type", help="Filter by type (PERSON, ORG, TECH, etc)")
+@click.option("--min-occurrences", default=2, help="Minimum occurrence count")
+@click.option("--limit", default=50, help="Maximum results")
+def entities(entity_type: str | None, min_occurrences: int, limit: int) -> None:
+    """List consolidated entities."""
+    params = f"min_occurrences={min_occurrences}&limit={limit}"
+    if entity_type:
+        params += f"&entity_type={entity_type}"
+    
+    result = api_request("GET", f"/api/v1/entities?{params}")
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    entities_list = result.get("entities", [])
+    if not entities_list:
+        console.print("[yellow]No entities found. Index some files first.[/yellow]")
+        return
+    
+    console.print(Panel.fit(f"[bold]🏷️  Consolidated Entities ({len(entities_list)})[/bold]", border_style="cyan"))
+    
+    table = Table()
+    table.add_column("Type", style="cyan")
+    table.add_column("Value")
+    table.add_column("Occurrences", justify="right")
+    table.add_column("Files", justify="right")
+    
+    for e in entities_list:
+        table.add_row(
+            e.get("entity_type", ""),
+            e.get("canonical_value", ""),
+            str(e.get("occurrence_count", 0)),
+            str(len(e.get("file_ids", []))),
+        )
+    
+    console.print(table)
+
+
+@main.command()
+@click.option("--type", "pattern_type", help="Filter by type")
+@click.option("--min-confidence", default=0.5, help="Minimum confidence")
+def patterns(pattern_type: str | None, min_confidence: float) -> None:
+    """List detected patterns."""
+    params = f"min_confidence={min_confidence}"
+    if pattern_type:
+        params += f"&pattern_type={pattern_type}"
+    
+    result = api_request("GET", f"/api/v1/patterns?{params}")
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    patterns_list = result.get("patterns", [])
+    if not patterns_list:
+        console.print("[yellow]No patterns found. Run correlation first.[/yellow]")
+        return
+    
+    console.print(Panel.fit(f"[bold]📊 Detected Patterns ({len(patterns_list)})[/bold]", border_style="magenta"))
+    
+    for p in patterns_list:
+        conf = p.get("confidence", 0)
+        console.print(f"\n[{'green' if conf >= 0.7 else 'yellow'}][{conf:.0%}][/] {p.get('title')}")
+        console.print(f"   [dim]{p.get('description')}[/dim]")
+
+
+@main.command()
+@click.option("--now", is_flag=True, help="Run synchronously (wait for completion)")
+def correlate(now: bool) -> None:
+    """Run correlation analysis to detect patterns and surface discoveries."""
+    console.print("[bold]🔗 Running Correlation Analysis...[/bold]")
+    
+    if now:
+        result = api_request("POST", "/api/v1/correlate/run")
+    else:
+        result = api_request("POST", "/api/v1/correlate")
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    if result.get("status") == "completed":
+        r = result.get("result", {})
+        stats = r.get("stats", {})
+        timing = r.get("timing", {})
+        
+        console.print("\n[green]✅ Correlation Complete[/green]")
+        console.print(f"   Entities consolidated: {stats.get('entities_consolidated', 0)}")
+        console.print(f"   Co-occurrence pairs: {stats.get('co_occurrence_pairs', 0)}")
+        console.print(f"   Patterns detected: {stats.get('patterns_detected', 0)}")
+        console.print(f"   [bold yellow]Discoveries surfaced: {stats.get('discoveries_surfaced', 0)}[/bold yellow]")
+        console.print(f"   Total time: {timing.get('total_time', 0):.2f}s")
+        
+        if stats.get('discoveries_surfaced', 0) > 0:
+            console.print("\n[cyan]View discoveries with: chimera discoveries[/cyan]")
+    elif result.get("status") == "queued":
+        console.print(f"[green]✅ Correlation queued. Job ID: {result.get('job_id')}[/green]")
+    else:
+        console.print(f"[red]Error: {result.get('error', 'Unknown error')}[/red]")
 
 
 @main.command()
 @click.option("--files", is_flag=True, help="Excavate files only")
-@click.option("--fae", is_flag=True, help="Excavate AI exports only (FAE)")
-@click.option("--correlate", is_flag=True, help="Run correlation after excavation")
+@click.option("--fae", is_flag=True, help="Excavate AI exports only")
+@click.option("--correlate", "do_correlate", is_flag=True, help="Run correlation after")
 @click.argument("paths", nargs=-1)
-def excavate(files: bool, fae: bool, correlate: bool, paths: tuple) -> None:
-    """Trigger cognitive archaeology excavation.
-    
-    Without flags, excavates everything: files + FAE + correlate.
-    """
+def excavate(files: bool, fae: bool, do_correlate: bool, paths: tuple) -> None:
+    """Trigger cognitive archaeology excavation."""
     if not files and not fae:
-        # Default: everything
         files = True
         fae = True
-        correlate = True
+        do_correlate = True
     
-    console.print("[bold]Starting Excavation[/bold]")
-    console.print("─" * 40)
+    console.print("[bold]⛏️  Starting Excavation[/bold]")
     if files:
         console.print("  📁 Files: [green]enabled[/green]")
     if fae:
-        console.print("  🤖 FAE (AI exports): [green]enabled[/green]")
-    if correlate:
-        console.print("  🔗 Correlation: [green]enabled[/green]")
-    if paths:
-        console.print(f"  📍 Paths: {', '.join(paths)}")
+        console.print("  🤖 FAE: [green]enabled[/green]")
+    if do_correlate:
+        console.print("  🔗 Correlate: [green]enabled[/green]")
     
     result = api_request("POST", "/api/v1/excavate", json={
         "files": files,
         "fae": fae,
-        "correlate": correlate,
+        "correlate": do_correlate,
         "paths": list(paths) if paths else None,
     })
     
     if result is None:
-        console.print("\n[red]Daemon not running. Start with: chimera serve[/red]")
+        console.print("\n[red]Daemon not running.[/red]")
         return
     
     if result.get("status") == "queued":
@@ -181,30 +400,22 @@ def excavate(files: bool, fae: bool, correlate: bool, paths: tuple) -> None:
 @main.command(name="fae")
 @click.argument("path", required=False)
 @click.option("--provider", type=click.Choice(["auto", "claude", "chatgpt", "gemini", "grok"]), default="auto")
-@click.option("--recursive", "-r", is_flag=True, help="Process directory recursively")
-@click.option("--correlate/--no-correlate", default=True, help="Run correlation after FAE")
-def fae_command(path: str | None, provider: str, recursive: bool, correlate: bool) -> None:
-    """Process AI conversation exports (Full Archaeology Excavation).
-    
-    Auto-detects provider format unless --provider specified.
-    """
-    console.print("[bold]FAE — Full Archaeology Excavation[/bold]")
-    console.print("─" * 40)
+@click.option("--correlate/--no-correlate", default=True)
+def fae_command(path: str | None, provider: str, correlate: bool) -> None:
+    """Process AI conversation exports (Full Archaeology Excavation)."""
+    console.print("[bold]🤖 FAE — Full Archaeology Excavation[/bold]")
     console.print(f"  Provider: {provider}")
     if path:
         console.print(f"  Path: {path}")
-    console.print(f"  Recursive: {recursive}")
-    console.print(f"  Correlate: {correlate}")
     
     result = api_request("POST", "/api/v1/fae", json={
         "path": path or "default",
         "provider": provider,
-        "recursive": recursive,
         "correlate": correlate,
     })
     
     if result is None:
-        console.print("\n[red]Daemon not running. Start with: chimera serve[/red]")
+        console.print("\n[red]Daemon not running.[/red]")
         return
     
     if result.get("status") == "queued":
@@ -214,39 +425,11 @@ def fae_command(path: str | None, provider: str, recursive: bool, correlate: boo
 
 
 @main.command()
-@click.option("--type", "discovery_type", help="Filter by discovery type")
-@click.option("--min-confidence", default=0.7, help="Minimum confidence threshold")
-def discoveries(discovery_type: str | None, min_confidence: float) -> None:
-    """List surfaced discoveries."""
-    params = f"min_confidence={min_confidence}"
-    if discovery_type:
-        params += f"&discovery_type={discovery_type}"
-    
-    result = api_request("GET", f"/api/v1/discoveries?{params}")
-    
-    if result is None:
-        console.print("[red]Daemon not running. Start with: chimera serve[/red]")
-        return
-    
-    if result.get("message"):
-        console.print(f"[yellow]{result['message']}[/yellow]")
-    
-    discoveries_list = result.get("discoveries", [])
-    if discoveries_list:
-        console.print(f"\n[bold]Discoveries (confidence >= {min_confidence})[/bold]")
-        for d in discoveries_list:
-            console.print(f"  [{d.get('confidence', 0):.2f}] {d.get('title')}")
-    else:
-        console.print("No discoveries found.")
-
-
-@main.command()
 def config() -> None:
     """Show current configuration."""
     cfg = load_config()
     
-    console.print("[bold]CHIMERA Configuration[/bold]")
-    console.print("─" * 50)
+    console.print(Panel.fit("[bold]CHIMERA Configuration[/bold]", border_style="cyan"))
     
     console.print(f"\n[cyan]Version:[/cyan] {cfg.version}")
     
@@ -254,20 +437,13 @@ def config() -> None:
     for s in cfg.sources:
         status = "✅" if s.enabled else "❌"
         console.print(f"  {status} {s.path} ({s.priority})")
-        if s.file_types:
-            console.print(f"      Types: {', '.join(s.file_types)}")
     
     console.print(f"\n[cyan]FAE:[/cyan]")
-    console.print(f"  Enabled: {'\u2705' if cfg.fae.enabled else '\u274c'}")
-    console.print(f"  Auto-detect: {'\u2705' if cfg.fae.auto_detect else '\u274c'}")
+    console.print(f"  Enabled: {'✅' if cfg.fae.enabled else '❌'}")
     if cfg.fae.watch_paths:
-        console.print(f"  Watch paths: {', '.join(cfg.fae.watch_paths)}")
+        console.print(f"  Watch: {', '.join(cfg.fae.watch_paths)}")
     
-    console.print(f"\n[cyan]API:[/cyan]")
-    console.print(f"  {cfg.api.host}:{cfg.api.port}")
-    
-    console.print(f"\n[cyan]Privacy:[/cyan]")
-    console.print(f"  Audit log: {'\u2705' if cfg.privacy.audit_log else '\u274c'}")
+    console.print(f"\n[cyan]API:[/cyan] {cfg.api.host}:{cfg.api.port}")
 
 
 @main.command()
@@ -275,26 +451,20 @@ def init() -> None:
     """Initialize CHIMERA configuration."""
     console.print("[bold]Initializing CHIMERA...[/bold]")
     
-    # Ensure directory structure
     config_dir = ensure_config_dir()
-    console.print(f"  Created: {config_dir}")
+    console.print(f"  ✅ {config_dir}")
     
-    # Check for existing config
     from chimera.config import DEFAULT_CONFIG_FILE
     
     if DEFAULT_CONFIG_FILE.exists():
-        console.print(f"  Config already exists: {DEFAULT_CONFIG_FILE}")
+        console.print(f"  [dim]Config exists: {DEFAULT_CONFIG_FILE}[/dim]")
     else:
-        # Create default config
         cfg = get_default_config()
         save_config(cfg)
-        console.print(f"  Created: {DEFAULT_CONFIG_FILE}")
+        console.print(f"  ✅ Created: {DEFAULT_CONFIG_FILE}")
     
     console.print("\n[green]✅ CHIMERA initialized.[/green]")
-    console.print("\nNext steps:")
-    console.print("  1. Edit ~/.chimera/chimera.yaml to configure sources")
-    console.print("  2. Run [cyan]chimera serve[/cyan] to start the daemon")
-    console.print("  3. Run [cyan]chimera status[/cyan] to check status")
+    console.print("\nNext: [cyan]chimera serve[/cyan]")
 
 
 @main.command()
@@ -303,31 +473,17 @@ def jobs() -> None:
     result = api_request("GET", "/api/v1/jobs")
     
     if result is None:
-        console.print("[red]Daemon not running. Start with: chimera serve[/red]")
+        console.print("[red]Daemon not running.[/red]")
         return
     
-    if result.get("error"):
-        console.print(f"[red]{result['error']}[/red]")
-        return
-    
-    console.print("[bold]Job Queue[/bold]")
-    console.print("─" * 40)
+    console.print(Panel.fit("[bold]Job Queue[/bold]", border_style="blue"))
     console.print(f"Pending: {result.get('pending', 0)}")
     
     stats = result.get("stats", {})
-    
     if stats.get("by_status"):
         console.print("\n[cyan]By Status:[/cyan]")
         for status, count in stats["by_status"].items():
             console.print(f"  {status}: {count}")
-    
-    if stats.get("by_type"):
-        console.print("\n[cyan]By Type:[/cyan]")
-        for job_type, count in stats["by_type"].items():
-            console.print(f"  {job_type}: {count}")
-    
-    if stats.get("recent_failures", 0) > 0:
-        console.print(f"\n[yellow]Recent failures (1h): {stats['recent_failures']}[/yellow]")
 
 
 @main.command()
@@ -338,17 +494,172 @@ def logs() -> None:
     log_file = DEFAULT_CONFIG_DIR / "logs" / "chimerad.log"
     
     if not log_file.exists():
-        console.print("[yellow]No log file found. Is the daemon running?[/yellow]")
+        console.print("[yellow]No log file found.[/yellow]")
         return
     
-    # Show last 50 lines
     with open(log_file) as f:
         lines = f.readlines()[-50:]
     
     console.print("[bold]Recent Logs[/bold]")
-    console.print("─" * 60)
     for line in lines:
         console.print(line.rstrip())
+
+
+# ============ Sprint 4: Graph Sync Commands ============
+
+@main.command(name="graph-export")
+@click.option("--output", "-o", default="discoveries.yaml", help="Output file")
+@click.option("--format", "fmt", type=click.Choice(["yaml", "json"]), default="yaml")
+def graph_export(output: str, fmt: str) -> None:
+    """Export discoveries as SIF pointer graph nodes."""
+    result = api_request("GET", "/api/v1/graph/export")
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    nodes = result.get("nodes", [])
+    
+    if not nodes:
+        console.print("[yellow]No discoveries to export. Run correlation first.[/yellow]")
+        return
+    
+    output_path = Path(output)
+    
+    if fmt == "yaml":
+        import yaml
+        with open(output_path, "w") as f:
+            yaml.dump({"discoveries": nodes}, f, default_flow_style=False)
+    else:
+        with open(output_path, "w") as f:
+            json.dump({"discoveries": nodes}, f, indent=2)
+    
+    console.print(f"[green]✅ Exported {len(nodes)} discoveries to {output_path}[/green]")
+
+
+@main.command(name="graph-sync")
+@click.option("--repo", default="Dshamir/sif-knowledge-base", help="GitHub repo")
+@click.option("--path", default="chimera/discoveries.yaml", help="Path in repo")
+@click.option("--dry-run", is_flag=True, help="Show what would be synced")
+def graph_sync(repo: str, path: str, dry_run: bool) -> None:
+    """Sync discoveries to SIF knowledge base on GitHub."""
+    result = api_request("POST", "/api/v1/graph/sync", json={
+        "repo": repo,
+        "path": path,
+        "dry_run": dry_run,
+    })
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    if dry_run:
+        console.print("[bold]Dry Run - Would sync:[/bold]")
+        nodes = result.get("nodes", [])
+        for n in nodes[:10]:
+            console.print(f"  - {n.get('label', 'unknown')}")
+        if len(nodes) > 10:
+            console.print(f"  ... and {len(nodes) - 10} more")
+    elif result.get("success"):
+        console.print(f"[green]✅ Synced {result.get('count', 0)} discoveries to {repo}[/green]")
+    else:
+        console.print(f"[red]Sync failed: {result.get('error', 'Unknown error')}[/red]")
+
+
+# ============ Sprint 4: Claude Integration ============
+
+@main.command()
+@click.argument("question")
+@click.option("--context", "-c", default=5, help="Number of context chunks")
+def ask(question: str, context: int) -> None:
+    """Ask a question using CHIMERA context (for Claude integration)."""
+    # Get relevant context
+    result = api_request("GET", f"/api/v1/query?q={question}&limit={context}")
+    
+    if result is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    chunks = result.get("results", [])
+    discoveries = api_request("GET", f"/api/v1/discoveries?limit=5")
+    discoveries_list = discoveries.get("discoveries", []) if discoveries else []
+    
+    # Build context block for Claude
+    console.print(Panel.fit("[bold]Context for Claude[/bold]", border_style="magenta"))
+    
+    context_text = f"""<chimera_context>
+<question>{question}</question>
+
+<relevant_content>
+"""
+    for i, chunk in enumerate(chunks, 1):
+        context_text += f"""<chunk index="{i}" similarity="{chunk.get('similarity', 0):.2f}" source="{chunk.get('file_path', '')}">
+{chunk.get('content', '')}
+</chunk>
+
+"""
+    
+    if discoveries_list:
+        context_text += """</relevant_content>
+
+<discoveries>
+"""
+        for d in discoveries_list:
+            context_text += f"""<discovery type="{d.get('discovery_type')}" confidence="{d.get('confidence', 0):.2f}">
+{d.get('title')}: {d.get('description', '')}
+</discovery>
+
+"""
+        context_text += "</discoveries>\n"
+    else:
+        context_text += "</relevant_content>\n"
+    
+    context_text += "</chimera_context>"
+    
+    console.print(Syntax(context_text, "xml", theme="monokai"))
+    
+    console.print("\n[dim]Copy the above context block when asking Claude.[/dim]")
+
+
+@main.command()
+def summary() -> None:
+    """Generate a summary of indexed knowledge (for Claude context)."""
+    # Get stats
+    status = api_request("GET", "/api/v1/status")
+    correlation = api_request("GET", "/api/v1/correlation/stats")
+    discoveries = api_request("GET", "/api/v1/discoveries?limit=10")
+    entities = api_request("GET", "/api/v1/entities?limit=20")
+    
+    if status is None:
+        console.print("[red]Daemon not running.[/red]")
+        return
+    
+    console.print(Panel.fit("[bold]🧠 CHIMERA Knowledge Summary[/bold]", border_style="green"))
+    
+    # Stats
+    catalog = status.get("catalog", {})
+    console.print(f"\n[cyan]Index Stats:[/cyan]")
+    console.print(f"  Files: {catalog.get('total_files', 0)}")
+    console.print(f"  Chunks: {catalog.get('total_chunks', 0)}")
+    console.print(f"  Entities: {catalog.get('total_entities', 0)}")
+    
+    # Top entities
+    if entities and entities.get("entities"):
+        console.print(f"\n[cyan]Top Entities:[/cyan]")
+        for e in entities["entities"][:10]:
+            console.print(f"  [{e.get('entity_type')}] {e.get('canonical_value')} ({e.get('occurrence_count')}x)")
+    
+    # Discoveries
+    if discoveries and discoveries.get("discoveries"):
+        console.print(f"\n[cyan]Active Discoveries:[/cyan]")
+        for d in discoveries["discoveries"][:5]:
+            console.print(f"  [{d.get('confidence', 0):.0%}] {d.get('title')}")
+    
+    # Correlation stats
+    if correlation:
+        console.print(f"\n[cyan]Correlation:[/cyan]")
+        console.print(f"  Patterns: {correlation.get('patterns', {}).get('total', 0)}")
+        console.print(f"  Discoveries: {correlation.get('discoveries', {}).get('total', 0)}")
 
 
 if __name__ == "__main__":
