@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 
+from chimera.correlation.engine import get_correlation_engine
 from chimera.daemon import get_daemon
 from chimera.queue import Job, JobPriority, JobType
 
@@ -123,6 +124,24 @@ async def run_correlation() -> dict:
         }
 
 
+@router.post("/correlate/run")
+async def run_correlation_now() -> dict:
+    """Run correlation immediately (synchronous)."""
+    try:
+        engine = get_correlation_engine()
+        result = await engine.run_correlation()
+        
+        return {
+            "status": "completed" if result.success else "failed",
+            "result": result.to_dict(),
+        }
+    except Exception as e:
+        return {
+            "status": "failed",
+            "error": str(e),
+        }
+
+
 @router.get("/jobs")
 async def get_jobs() -> dict:
     """Get job queue statistics."""
@@ -147,14 +166,41 @@ async def get_jobs() -> dict:
 
 @router.post("/discoveries/{discovery_id}/feedback")
 async def discovery_feedback(discovery_id: str, request: dict) -> dict:
-    """Provide feedback on a discovery (confirm, dismiss, correct)."""
-    # TODO: Implement feedback (Sprint 3)
-    action = request.get("action")  # confirm, dismiss, correct
+    """Provide feedback on a discovery (confirm, dismiss)."""
+    action = request.get("action")  # confirm, dismiss
     notes = request.get("notes")
     
-    return {
-        "id": discovery_id,
-        "action": action,
-        "notes": notes,
-        "message": "Feedback not yet implemented (Sprint 3)",
-    }
+    if action not in ("confirm", "dismiss"):
+        return {"error": "action must be 'confirm' or 'dismiss'"}
+    
+    try:
+        engine = get_correlation_engine()
+        
+        if action == "confirm":
+            success = engine.confirm_discovery(discovery_id, notes)
+        else:
+            success = engine.dismiss_discovery(discovery_id, notes)
+        
+        return {
+            "id": discovery_id,
+            "action": action,
+            "success": success,
+            "notes": notes,
+        }
+    except Exception as e:
+        return {
+            "id": discovery_id,
+            "action": action,
+            "success": False,
+            "error": str(e),
+        }
+
+
+@router.get("/correlation/stats")
+async def correlation_stats() -> dict:
+    """Get correlation engine statistics."""
+    try:
+        engine = get_correlation_engine()
+        return engine.get_stats()
+    except Exception as e:
+        return {"error": str(e)}
