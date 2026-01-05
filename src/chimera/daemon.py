@@ -3,6 +3,7 @@
 This is the heart of CHIMERA. It coordinates:
 - File watching
 - Job queue processing
+- Extraction pipeline
 - API server
 - Scheduled tasks
 """
@@ -34,6 +35,7 @@ class ChimeraDaemon:
     - Config loading
     - File watching
     - Job queue
+    - Extraction pipeline
     - API server
     - Scheduled tasks
     """
@@ -51,11 +53,13 @@ class ChimeraDaemon:
         # Components (initialized on start)
         self.watcher: FileWatcher | None = None
         self.queue: JobQueue | None = None
+        self.pipeline = None  # Lazy loaded
         self._worker_task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
         
         # Stats
         self.files_detected = 0
+        self.files_indexed = 0
         self.jobs_processed = 0
         self.jobs_failed = 0
     
@@ -65,6 +69,13 @@ class ChimeraDaemon:
         if self.started_at is None:
             return 0.0
         return (datetime.now() - self.started_at).total_seconds()
+    
+    def _get_pipeline(self):
+        """Lazy load extraction pipeline."""
+        if self.pipeline is None:
+            from chimera.extractors.pipeline import ExtractionPipeline
+            self.pipeline = ExtractionPipeline()
+        return self.pipeline
     
     async def start(self) -> None:
         """Start the daemon and all components."""
@@ -189,28 +200,60 @@ class ChimeraDaemon:
             logger.warning(f"Unknown job type: {job.job_type}")
     
     async def _process_file_extraction(self, job: Job) -> None:
-        """Process file extraction job."""
+        """Process file extraction job using the pipeline."""
         path = Path(job.payload.get("path", ""))
+        
+        if not path.exists():
+            logger.warning(f"File no longer exists: {path}")
+            return
+        
         logger.info(f"Extracting: {path}")
         
-        # TODO: Implement extraction pipeline (Sprint 2)
-        # For now, just log
-        await asyncio.sleep(0.1)  # Simulate work
+        # Use the extraction pipeline
+        pipeline = self._get_pipeline()
+        result = await pipeline.process_file(path)
+        
+        if result.success:
+            self.files_indexed += 1
+            logger.info(
+                f"Indexed: {path.name} "
+                f"({result.chunk_count} chunks, {result.entity_count} entities)"
+            )
+        else:
+            logger.error(f"Extraction failed: {path}: {result.error}")
     
     async def _process_fae(self, job: Job) -> None:
         """Process FAE (AI export) job."""
         path = Path(job.payload.get("path", ""))
-        logger.info(f"Processing FAE: {path}")
+        provider = job.payload.get("provider", "auto")
         
-        # TODO: Implement FAE processing (Sprint 2)
-        await asyncio.sleep(0.1)
+        logger.info(f"Processing FAE: {path} (provider: {provider})")
+        
+        # TODO: Implement full FAE processing (Sprint 2 continuation)
+        from chimera.extractors.fae import FAEProcessor
+        
+        processor = FAEProcessor()
+        result = processor.process(path, provider if provider != "auto" else None)
+        
+        if result.success:
+            logger.info(
+                f"FAE processed: {path.name} "
+                f"({len(result.conversations)} conversations, provider: {result.provider})"
+            )
+        else:
+            logger.error(f"FAE failed: {path}: {result.error}")
     
     async def _process_correlation(self, job: Job) -> None:
         """Process correlation job."""
         logger.info("Running correlation analysis...")
         
         # TODO: Implement correlation (Sprint 3)
-        await asyncio.sleep(0.1)
+        from chimera.correlation.engine import CorrelationEngine
+        
+        engine = CorrelationEngine()
+        patterns = await engine.run_correlation()
+        
+        logger.info(f"Correlation complete: {len(patterns)} patterns found")
     
     async def _process_discovery(self, job: Job) -> None:
         """Process discovery surfacing job."""
@@ -221,6 +264,17 @@ class ChimeraDaemon:
     
     def get_status(self) -> dict:
         """Get daemon status."""
+        # Get storage stats
+        catalog_stats = {}
+        vector_stats = {}
+        
+        try:
+            if self.pipeline:
+                catalog_stats = self.pipeline.catalog.get_stats()
+                vector_stats = self.pipeline.vectors.get_stats()
+        except Exception:
+            pass
+        
         return {
             "version": __version__,
             "running": self.running,
@@ -229,9 +283,12 @@ class ChimeraDaemon:
             "dev_mode": self.dev_mode,
             "stats": {
                 "files_detected": self.files_detected,
+                "files_indexed": self.files_indexed,
                 "jobs_processed": self.jobs_processed,
                 "jobs_failed": self.jobs_failed,
             },
+            "catalog": catalog_stats,
+            "vectors": vector_stats,
             "config": {
                 "sources": len(self.config.sources),
                 "fae_enabled": self.config.fae.enabled,
