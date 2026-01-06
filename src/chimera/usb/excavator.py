@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 try:
     from rich.console import Console
@@ -52,11 +52,17 @@ BANNER = """
 """
 
 
+def is_wsl() -> bool:
+    """Check if running in WSL."""
+    return "microsoft" in platform.release().lower() or "wsl" in platform.release().lower()
+
+
 class USBExcavator:
     """Portable excavation system for USB deployment."""
     
     def __init__(self):
         self.os_type = platform.system()  # Windows, Linux, Darwin
+        self.is_wsl = is_wsl()
         self.machine_id = self._get_machine_id()
         self.usb_root = self._find_usb_root()
         self.excavation_dir = None
@@ -110,13 +116,18 @@ class USBExcavator:
             return os.geteuid() == 0
     
     def request_admin(self):
-        """Request admin elevation."""
+        """Request admin elevation - WSL aware."""
         if self.check_admin():
             return True
         
         console.print("[yellow]⚠ Admin privileges required for full drive access[/yellow]")
         
-        if self.os_type == "Windows":
+        if self.is_wsl:
+            # In WSL, we can't easily elevate - just continue without
+            console.print("[dim]WSL detected - continuing with user permissions[/dim]")
+            console.print("[dim]Most user files will still be accessible[/dim]")
+            return False
+        elif self.os_type == "Windows":
             console.print("[dim]Requesting elevation...[/dim]")
             import ctypes
             ctypes.windll.shell32.ShellExecuteW(
@@ -127,8 +138,8 @@ class USBExcavator:
             console.print("[red]Please run with sudo: sudo python excavator.py[/red]")
             sys.exit(1)
     
-    def get_drives(self) -> list[dict]:
-        """Get list of available drives."""
+    def get_drives(self) -> List[Dict]:
+        """Get list of available drives - WSL aware."""
         drives = []
         
         if self.os_type == "Windows":
@@ -161,13 +172,63 @@ class USBExcavator:
                     except:
                         pass
                 bitmask >>= 1
+        
+        elif self.is_wsl:
+            # WSL: Check /mnt/c, /mnt/d, /mnt/e, etc. for Windows drives
+            import shutil
+            
+            # Windows drives mounted under /mnt
+            mnt_path = Path("/mnt")
+            if mnt_path.exists():
+                for item in mnt_path.iterdir():
+                    if item.is_dir() and len(item.name) == 1 and item.name.isalpha():
+                        try:
+                            total, used, free = shutil.disk_usage(str(item))
+                            drives.append({
+                                "path": str(item),
+                                "letter": item.name.upper(),
+                                "total_gb": total / (1024**3),
+                                "free_gb": free / (1024**3),
+                                "type": "Windows",
+                            })
+                        except:
+                            pass
+            
+            # Also add Linux root
+            try:
+                total, used, free = shutil.disk_usage("/")
+                drives.append({
+                    "path": "/",
+                    "letter": "/",
+                    "total_gb": total / (1024**3),
+                    "free_gb": free / (1024**3),
+                    "type": "Linux Root",
+                })
+            except:
+                pass
+            
+            # Home directory
+            home = Path.home()
+            if home.exists() and str(home) != "/":
+                try:
+                    total, used, free = shutil.disk_usage(str(home))
+                    drives.append({
+                        "path": str(home),
+                        "letter": "~",
+                        "total_gb": total / (1024**3),
+                        "free_gb": free / (1024**3),
+                        "type": "Home",
+                    })
+                except:
+                    pass
+        
         else:
             # Linux/Mac - check common mount points
+            import shutil
             mount_points = ["/", "/home", "/mnt", "/media"]
             for mp in mount_points:
                 if os.path.exists(mp):
                     try:
-                        import shutil
                         total, used, free = shutil.disk_usage(mp)
                         drives.append({
                             "path": mp,
@@ -193,7 +254,7 @@ class USBExcavator:
         
         table = Table(show_header=True, header_style="bold cyan")
         table.add_column("#", style="dim", width=4)
-        table.add_column("Drive", width=10)
+        table.add_column("Drive", width=20)
         table.add_column("Size", width=12)
         table.add_column("Free", width=12)
         table.add_column("Type", width=12)
@@ -210,14 +271,33 @@ class USBExcavator:
         # Add "All Drives" option
         table.add_row(str(len(drives) + 1), "* ALL *", "-", "-", "Multiple")
         
+        # Add custom path option
+        table.add_row(str(len(drives) + 2), "[Custom Path]", "-", "-", "Manual")
+        
         console.print(table)
         
-        choice = Prompt.ask("\nSelect drive", default="1")
+        choice = Prompt.ask("\nSelect drive (or enter path)", default="1")
+        
+        # Check if it's a path
+        if choice.startswith("/") or (len(choice) > 1 and choice[1] == ":"):
+            custom_path = Path(choice)
+            if custom_path.exists():
+                return custom_path
+            else:
+                console.print(f"[red]Path not found: {choice}[/red]")
+                return None
         
         try:
             idx = int(choice) - 1
             if idx == len(drives):  # All drives
                 return "ALL"
+            if idx == len(drives) + 1:  # Custom path
+                custom = Prompt.ask("Enter path")
+                custom_path = Path(custom)
+                if custom_path.exists():
+                    return custom_path
+                console.print(f"[red]Path not found: {custom}[/red]")
+                return None
             if 0 <= idx < len(drives):
                 return Path(drives[idx]["path"])
         except:
@@ -248,6 +328,7 @@ class USBExcavator:
             "os": self.os_type,
             "os_version": platform.version(),
             "hostname": platform.node(),
+            "is_wsl": self.is_wsl,
             "excavation_start": self.stats["start_time"].isoformat() if self.stats["start_time"] else None,
             "excavation_end": self.stats["end_time"].isoformat() if self.stats["end_time"] else None,
             "stats": {
@@ -267,35 +348,42 @@ class USBExcavator:
         console.clear()
         console.print(BANNER)
         
-        # Step 1: Check/request admin
+        # Step 1: System info
         console.print("\n[bold]SYSTEM CHECK[/bold]")
         console.print(f"  OS: {self.os_type} {platform.release()}")
+        if self.is_wsl:
+            console.print(f"  Environment: [cyan]WSL[/cyan] (Windows Subsystem for Linux)")
         console.print(f"  Machine: {self.machine_id}")
         console.print(f"  USB Root: {self.usb_root}")
         
+        # Step 2: Admin check - more lenient in WSL
         if not self.check_admin():
-            if Confirm.ask("\n[yellow]Request admin privileges?[/yellow]"):
-                self.request_admin()
+            if self.is_wsl:
+                console.print("  Admin: [yellow]○[/yellow] (WSL - user mode)")
+                console.print("[dim]  → Most files accessible without elevation[/dim]")
             else:
-                console.print("[dim]Continuing with limited access...[/dim]")
+                if Confirm.ask("\n[yellow]Request admin privileges?[/yellow]"):
+                    self.request_admin()
+                else:
+                    console.print("[dim]Continuing with limited access...[/dim]")
         else:
             console.print("  Admin: [green]✓[/green]")
         
-        # Step 2: Select target drive
+        # Step 3: Select target drive
         target = self.select_target_drive()
         if not target:
             return
         
-        # Step 3: Setup excavation directory
+        # Step 4: Setup excavation directory
         self.setup_excavation_dir()
         console.print(f"\n[green]✓[/green] Output: {self.excavation_dir}")
         
-        # Step 4: Confirm and start
+        # Step 5: Confirm and start
         if not Confirm.ask("\n[bold]Start excavation?[/bold]"):
             console.print("[yellow]Cancelled[/yellow]")
             return
         
-        # Step 5: Run excavation with telemetry
+        # Step 6: Run excavation with telemetry
         self.stats["start_time"] = datetime.now()
         
         if target == "ALL":
@@ -307,7 +395,7 @@ class USBExcavator:
         
         self.stats["end_time"] = datetime.now()
         
-        # Step 6: Save metadata and summary
+        # Step 7: Save metadata and summary
         self.save_metadata()
         
         # Show completion
@@ -344,16 +432,21 @@ class USBExcavator:
             ".html", ".css", ".sql",
         }
         
+        # Directories to skip
+        skip_dirs = {
+            'node_modules', '__pycache__', '.git', 'venv', 'env',
+            'Windows', 'Program Files', 'Program Files (x86)',
+            '$Recycle.Bin', 'System Volume Information',
+            '.cache', '.local', '.config', 'snap',
+            'AppData', 'ProgramData',
+        }
+        
         # Start live telemetry
         with Live(dashboard.get_layout(), refresh_per_second=4, console=console) as live:
             # Walk the drive
             for root, dirs, files in os.walk(drive_path):
                 # Skip system directories
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in [
-                    'node_modules', '__pycache__', '.git', 'venv', 'env',
-                    'Windows', 'Program Files', 'Program Files (x86)',
-                    '$Recycle.Bin', 'System Volume Information'
-                ]]
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in skip_dirs]
                 
                 for filename in files:
                     file_path = Path(root) / filename
@@ -375,6 +468,9 @@ class USBExcavator:
                             self.stats["entities_extracted"] += result.get("entities", 0)
                             dashboard.add_to_feed(f"✓ {file_path.name}")
                         
+                    except PermissionError:
+                        self.stats["errors"] += 1
+                        dashboard.add_to_feed(f"⊘ {file_path.name}: Permission denied")
                     except Exception as e:
                         self.stats["errors"] += 1
                         dashboard.add_to_feed(f"✗ {file_path.name}: {str(e)[:30]}")
@@ -436,7 +532,7 @@ class USBExcavator:
         except Exception as e:
             return None
     
-    def _simple_chunk(self, content: str, chunk_size: int = 1000) -> list[dict]:
+    def _simple_chunk(self, content: str, chunk_size: int = 1000) -> List[Dict]:
         """Simple text chunking."""
         chunks = []
         words = content.split()
@@ -466,7 +562,7 @@ class USBExcavator:
         
         return chunks
     
-    def _simple_entities(self, content: str) -> list[dict]:
+    def _simple_entities(self, content: str) -> List[Dict]:
         """Simple entity extraction (pattern-based, no spaCy needed)."""
         import re
         
