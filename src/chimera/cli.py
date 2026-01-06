@@ -2,6 +2,7 @@
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import click
@@ -11,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.syntax import Syntax
 from rich.markdown import Markdown
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
 from chimera import __version__
 from chimera.config import ensure_config_dir, get_default_config, load_config, save_config
@@ -28,9 +30,80 @@ def api_request(method: str, endpoint: str, **kwargs) -> dict | None:
         return response.json()
     except httpx.ConnectError:
         return None
-    except Exception as e:
-        console.print(f"[red]API error: {e}[/red]")
+    except httpx.TimeoutException:
+        console.print(f"[yellow]⚠ Request timed out[/yellow]")
         return None
+    except Exception as e:
+        console.print(f"[red]✗ API error: {e}[/red]")
+        return None
+
+
+def api_request_with_spinner(method: str, endpoint: str, message: str, **kwargs) -> tuple[dict | None, str | None]:
+    """Make API request with spinner and error handling."""
+    url = f"{DEFAULT_API_URL}{endpoint}"
+    try:
+        with console.status(f"[cyan]{message}[/cyan]", spinner="dots"):
+            response = httpx.request(method, url, timeout=30, **kwargs)
+            result = response.json()
+
+            if response.status_code >= 400:
+                return None, f"HTTP {response.status_code}: {result.get('error', 'Unknown')}"
+
+            if result.get("error"):
+                return None, result["error"]
+
+            return result, None
+
+    except httpx.ConnectError:
+        return None, "Cannot connect to daemon. Is it running?"
+    except httpx.TimeoutException:
+        return None, "Request timed out"
+    except Exception as e:
+        return None, str(e)
+
+
+def is_daemon_running() -> bool:
+    """Check if daemon is running."""
+    try:
+        response = httpx.get(f"{DEFAULT_API_URL}/api/v1/health", timeout=10)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+
+def daemon_status_dot() -> str:
+    """Return colored dot indicating daemon status."""
+    return "[green]●[/green]" if is_daemon_running() else "[red]●[/red]"
+
+
+def print_daemon_status_line() -> None:
+    """Print a single line showing daemon status."""
+    if is_daemon_running():
+        console.print("[green]● Daemon running[/green]")
+    else:
+        console.print("[red]● Daemon stopped[/red]")
+
+
+def print_success(message: str) -> None:
+    """Print success message."""
+    console.print(f"[green]✓[/green] {message}")
+
+
+def print_error(message: str, detail: str | None = None) -> None:
+    """Print error message."""
+    console.print(f"[red]✗[/red] {message}")
+    if detail:
+        console.print(f"  [dim]{detail}[/dim]")
+
+
+def print_warning(message: str) -> None:
+    """Print warning message."""
+    console.print(f"[yellow]⚠[/yellow] {message}")
+
+
+def print_info(message: str) -> None:
+    """Print info message."""
+    console.print(f"[blue]ℹ[/blue] {message}")
 
 
 @click.group()
@@ -54,26 +127,119 @@ def serve(dev: bool, host: str, port: int) -> None:
     console.print(f"  Port: {port}")
     console.print(f"  Dev mode: {dev}")
     console.print()
-    
+
     from chimera.daemon import run_daemon
     run_daemon(host=host, port=port, dev_mode=dev)
+
+
+@main.command()
+def stop() -> None:
+    """Stop the CHIMERA daemon."""
+    if not is_daemon_running():
+        print_error("Daemon is not running")
+        return
+
+    with console.status("[yellow]Stopping daemon...[/yellow]", spinner="dots") as status:
+        result = api_request("POST", "/api/v1/shutdown")
+
+        if result and result.get("status") == "shutting_down":
+            # Wait for daemon to stop
+            for i in range(20):
+                time.sleep(0.5)
+                status.update(f"[yellow]Stopping daemon{'.' * (i % 4)}[/yellow]")
+                if not is_daemon_running():
+                    break
+
+    if not is_daemon_running():
+        print_success("Daemon stopped")
+    else:
+        print_warning("Daemon may still be shutting down...")
+
+
+@main.command()
+@click.option("--dev", is_flag=True, help="Run in development mode")
+@click.option("--host", default="127.0.0.1", help="API host")
+@click.option("--port", default=7777, type=int, help="API port")
+def restart(dev: bool, host: str, port: int) -> None:
+    """Restart the CHIMERA daemon."""
+    was_running = is_daemon_running()
+
+    if was_running:
+        with console.status("[yellow]Stopping daemon...[/yellow]", spinner="dots") as status:
+            api_request("POST", "/api/v1/shutdown")
+
+            # Wait for daemon to stop
+            for i in range(20):
+                time.sleep(0.5)
+                status.update(f"[yellow]Stopping daemon{'.' * (i % 4)}[/yellow]")
+                if not is_daemon_running():
+                    break
+
+        if is_daemon_running():
+            print_error("Failed to stop daemon")
+            console.print("Try: [cyan]chimera stop[/cyan]")
+            return
+
+        print_success("Daemon stopped")
+        time.sleep(1)  # Brief pause before restart
+    else:
+        print_info("Daemon was not running")
+
+    console.print()
+    console.print(f"[bold green]Starting CHIMERA daemon v{__version__}[/bold green]")
+    console.print(f"  Host: {host}")
+    console.print(f"  Port: {port}")
+    console.print(f"  Dev mode: {dev}")
+    console.print()
+
+    from chimera.daemon import run_daemon
+    run_daemon(host=host, port=port, dev_mode=dev)
+
+
+@main.command()
+def ping() -> None:
+    """Quick check if daemon is running (shows colored dot)."""
+    print_daemon_status_line()
+
+
+@main.command()
+@click.option("--refresh", "-r", default=1.0, help="Refresh rate in seconds")
+def dashboard(refresh: float) -> None:
+    """Launch real-time telemetry dashboard."""
+    if not is_daemon_running():
+        print_error("Daemon is not running")
+        console.print("Start with: [cyan]chimera serve[/cyan]")
+        return
+
+    print_info("Launching telemetry dashboard...")
+    print_info("Press Ctrl+C to exit")
+    console.print()
+
+    try:
+        from chimera.telemetry import run_dashboard
+        run_dashboard(refresh_rate=refresh)
+    except ImportError as e:
+        print_error("Failed to import telemetry module", str(e))
+    except KeyboardInterrupt:
+        console.print("\n")
+        print_info("Dashboard closed")
 
 
 @main.command()
 def status() -> None:
     """Show CHIMERA daemon status."""
     result = api_request("GET", "/api/v1/status")
-    
+
     if result is None:
-        console.print("[red]CHIMERA daemon is not running.[/red]")
+        console.print(f"[red]●[/red] [bold]CHIMERA[/bold] — [red]Daemon not running[/red]")
         console.print("\nStart with: [cyan]chimera serve[/cyan]")
         return
-    
+
     if result.get("error"):
-        console.print(f"[red]{result['error']}[/red]")
+        console.print(f"[red]●[/red] [bold]CHIMERA[/bold] — [red]{result['error']}[/red]")
         return
-    
-    console.print(Panel.fit("[bold green]CHIMERA Status[/bold green]", border_style="green"))
+
+    console.print(Panel.fit(f"[green]●[/green] [bold]CHIMERA Status[/bold]", border_style="green"))
     
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="cyan")
@@ -329,35 +495,72 @@ def patterns(pattern_type: str | None, min_confidence: float) -> None:
 @click.option("--now", is_flag=True, help="Run synchronously (wait for completion)")
 def correlate(now: bool) -> None:
     """Run correlation analysis to detect patterns and surface discoveries."""
-    console.print("[bold]🔗 Running Correlation Analysis...[/bold]")
-    
+    console.print(f"{daemon_status_dot()} [bold]Correlation Analysis[/bold]\n")
+
     if now:
-        result = api_request("POST", "/api/v1/correlate/run")
+        # Synchronous with progress
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("[cyan]Running correlation...", total=None)
+
+            result, error = api_request_with_spinner(
+                "POST", "/api/v1/correlate/run",
+                "Consolidating entities and detecting patterns..."
+            )
+
+            if error:
+                print_error("Correlation failed", error)
+                return
+
+            progress.update(task, completed=True)
+
+        if result and result.get("status") == "completed":
+            r = result.get("result", {})
+            stats = r.get("stats", {})
+            timing = r.get("timing", {})
+
+            print_success("Correlation complete")
+            console.print()
+
+            # Stats table
+            table = Table(show_header=False, box=None, padding=(0, 2))
+            table.add_column("Metric", style="cyan")
+            table.add_column("Value", justify="right")
+
+            table.add_row("Entities consolidated", f"{stats.get('entities_consolidated', 0):,}")
+            table.add_row("Co-occurrence pairs", f"{stats.get('co_occurrence_pairs', 0):,}")
+            table.add_row("Patterns detected", str(stats.get('patterns_detected', 0)))
+            table.add_row("Discoveries surfaced", f"[bold yellow]{stats.get('discoveries_surfaced', 0)}[/bold yellow]")
+            table.add_row("Time elapsed", f"{timing.get('total_time', 0):.2f}s")
+
+            console.print(table)
+
+            if stats.get('discoveries_surfaced', 0) > 0:
+                console.print(f"\n[dim]View with:[/dim] [cyan]chimera discoveries[/cyan]")
+        else:
+            print_error("Correlation returned unexpected status", str(result))
     else:
-        result = api_request("POST", "/api/v1/correlate")
-    
-    if result is None:
-        console.print("[red]Daemon not running.[/red]")
-        return
-    
-    if result.get("status") == "completed":
-        r = result.get("result", {})
-        stats = r.get("stats", {})
-        timing = r.get("timing", {})
-        
-        console.print("\n[green]✅ Correlation Complete[/green]")
-        console.print(f"   Entities consolidated: {stats.get('entities_consolidated', 0)}")
-        console.print(f"   Co-occurrence pairs: {stats.get('co_occurrence_pairs', 0)}")
-        console.print(f"   Patterns detected: {stats.get('patterns_detected', 0)}")
-        console.print(f"   [bold yellow]Discoveries surfaced: {stats.get('discoveries_surfaced', 0)}[/bold yellow]")
-        console.print(f"   Total time: {timing.get('total_time', 0):.2f}s")
-        
-        if stats.get('discoveries_surfaced', 0) > 0:
-            console.print("\n[cyan]View discoveries with: chimera discoveries[/cyan]")
-    elif result.get("status") == "queued":
-        console.print(f"[green]✅ Correlation queued. Job ID: {result.get('job_id')}[/green]")
-    else:
-        console.print(f"[red]Error: {result.get('error', 'Unknown error')}[/red]")
+        # Async queue
+        result, error = api_request_with_spinner(
+            "POST", "/api/v1/correlate",
+            "Queueing correlation job..."
+        )
+
+        if error:
+            print_error("Failed to queue correlation", error)
+            return
+
+        if result and result.get("status") == "queued":
+            print_success(f"Correlation queued")
+            console.print(f"  [dim]Job ID: {result.get('job_id')}[/dim]")
+            console.print(f"\n[dim]Monitor with:[/dim] [cyan]chimera jobs[/cyan]")
+        else:
+            print_error("Unexpected response", str(result))
 
 
 @main.command()
@@ -371,30 +574,46 @@ def excavate(files: bool, fae: bool, do_correlate: bool, paths: tuple) -> None:
         files = True
         fae = True
         do_correlate = True
-    
-    console.print("[bold]⛏️  Starting Excavation[/bold]")
+
+    console.print(f"{daemon_status_dot()} [bold]Excavation[/bold]\n")
+
+    # Show scope
+    scope_items = []
     if files:
-        console.print("  📁 Files: [green]enabled[/green]")
+        scope_items.append("[green]✓[/green] Files")
     if fae:
-        console.print("  🤖 FAE: [green]enabled[/green]")
+        scope_items.append("[green]✓[/green] FAE exports")
     if do_correlate:
-        console.print("  🔗 Correlate: [green]enabled[/green]")
-    
-    result = api_request("POST", "/api/v1/excavate", json={
-        "files": files,
-        "fae": fae,
-        "correlate": do_correlate,
-        "paths": list(paths) if paths else None,
-    })
-    
-    if result is None:
-        console.print("\n[red]Daemon not running.[/red]")
+        scope_items.append("[green]✓[/green] Correlation")
+    if paths:
+        scope_items.append(f"[cyan]→[/cyan] {len(paths)} path(s)")
+
+    for item in scope_items:
+        console.print(f"  {item}")
+    console.print()
+
+    result, error = api_request_with_spinner(
+        "POST", "/api/v1/excavate",
+        "Queueing excavation job...",
+        json={
+            "files": files,
+            "fae": fae,
+            "correlate": do_correlate,
+            "paths": list(paths) if paths else None,
+        }
+    )
+
+    if error:
+        print_error("Failed to start excavation", error)
         return
-    
-    if result.get("status") == "queued":
-        console.print(f"\n[green]✅ Excavation queued. Job ID: {result.get('job_id')}[/green]")
+
+    if result and result.get("status") == "queued":
+        print_success("Excavation started")
+        console.print(f"  [dim]Job ID: {result.get('job_id')}[/dim]")
+        console.print(f"\n[dim]Monitor progress:[/dim] [cyan]chimera dashboard[/cyan]")
+        console.print(f"[dim]Check jobs:[/dim] [cyan]chimera jobs[/cyan]")
     else:
-        console.print(f"\n[red]Error: {result.get('error', 'Unknown error')}[/red]")
+        print_error("Unexpected response", str(result))
 
 
 @main.command(name="fae")

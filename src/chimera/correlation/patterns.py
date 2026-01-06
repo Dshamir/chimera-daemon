@@ -236,50 +236,51 @@ class PatternDetector:
         
         conn = self.catalog.get_connection()
         cursor = conn.cursor()
-        
+
         # Analyze file naming patterns
         cursor.execute("""
-            SELECT filename, extension, created_at, path
+            SELECT id, filename, extension, created_at, path
             FROM files
             WHERE status = 'indexed'
         """)
-        
-        naming_patterns: dict[str, dict] = defaultdict(lambda: {"count": 0, "examples": []})
-        
-        for filename, extension, created_at, path in cursor.fetchall():
+
+        naming_patterns: dict[str, dict] = defaultdict(lambda: {"count": 0, "examples": [], "file_ids": set()})
+
+        for file_id, filename, extension, created_at, path in cursor.fetchall():
             # Check for common naming patterns
             patterns_found = []
-            
+
             # Date in filename
             if re.search(r'\d{4}[-_]?\d{2}[-_]?\d{2}', filename):
                 patterns_found.append("date_prefix")
-            
+
             # Version numbers
             if re.search(r'v\d+|_v\d+|version', filename.lower()):
                 patterns_found.append("versioned")
-            
+
             # Draft/final indicators
             if re.search(r'draft|final|wip', filename.lower()):
                 patterns_found.append("status_suffix")
-            
+
             # Project prefixes
             if re.search(r'^[A-Z]{2,5}[-_]', filename):
                 patterns_found.append("project_prefix")
-            
+
             for pattern in patterns_found:
                 naming_patterns[pattern]["count"] += 1
+                naming_patterns[pattern]["file_ids"].add(file_id)
                 if len(naming_patterns[pattern]["examples"]) < 5:
                     naming_patterns[pattern]["examples"].append(filename)
-        
+
         conn.close()
-        
+
         # Create workflow patterns
         for pattern_name, data in naming_patterns.items():
             if data["count"] < 3:
                 continue
-            
+
             confidence = min(1.0, data["count"] / 20)
-            
+
             if confidence >= 0.3:
                 pattern_id = f"wf_{pattern_name}"
                 self._patterns[pattern_id] = Pattern(
@@ -292,6 +293,7 @@ class PatternDetector:
                         "file_count": data["count"],
                         "examples": data["examples"],
                     }],
+                    source_files=data["file_ids"],
                 )
     
     def _detect_tech_stack_patterns(self) -> None:

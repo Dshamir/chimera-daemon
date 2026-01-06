@@ -75,9 +75,14 @@ class CatalogDB:
     def _init_db(self) -> None:
         """Initialize database schema."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        conn = sqlite3.connect(self.db_path)
+
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         cursor = conn.cursor()
+
+        # Enable WAL mode for better concurrent access
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
         
         # Sources table
         cursor.execute("""
@@ -286,9 +291,13 @@ class CatalogDB:
         logger.debug(f"Catalog database initialized: {self.db_path}")
     
     def get_connection(self) -> sqlite3.Connection:
-        """Get database connection."""
-        conn = sqlite3.connect(self.db_path)
+        """Get database connection with WAL mode for concurrency."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
+        # Enable WAL mode for better concurrent access
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
     
     # ========== File Operations ==========
@@ -539,7 +548,16 @@ class CatalogDB:
         
         cursor.execute("SELECT COUNT(*) FROM entities")
         stats["total_entities"] = cursor.fetchone()[0]
-        
+
+        # Entity counts by type
+        cursor.execute("""
+            SELECT entity_type, COUNT(*) FROM entities
+            GROUP BY entity_type
+            ORDER BY COUNT(*) DESC
+            LIMIT 10
+        """)
+        stats["entities_by_type"] = dict(cursor.fetchall())
+
         cursor.execute("SELECT COUNT(*) FROM discoveries WHERE status = 'active'")
         stats["active_discoveries"] = cursor.fetchone()[0]
         

@@ -64,19 +64,27 @@ class Job:
 
 class JobQueue:
     """Persistent job queue backed by SQLite."""
-    
+
     def __init__(self, db_path: Path | None = None) -> None:
         if db_path is None:
             db_path = DEFAULT_CONFIG_DIR / "jobs.db"
         self.db_path = db_path
         self._queue: asyncio.PriorityQueue[tuple[int, str, Job]] = asyncio.PriorityQueue()
         self._init_db()
-    
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get database connection with WAL mode for concurrency."""
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
     def _init_db(self) -> None:
         """Initialize the SQLite database."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        conn = sqlite3.connect(self.db_path)
+
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -126,7 +134,7 @@ class JobQueue:
     
     async def enqueue(self, job: Job) -> str:
         """Add a job to the queue."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -169,7 +177,7 @@ class JobQueue:
         error: str | None = None,
     ) -> None:
         """Update job status."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         now = datetime.now().isoformat()
@@ -197,7 +205,7 @@ class JobQueue:
     
     async def get_pending_count(self) -> int:
         """Get count of pending jobs."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -211,7 +219,7 @@ class JobQueue:
     
     async def get_stats(self) -> dict:
         """Get job queue statistics."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         stats = {}
@@ -241,7 +249,7 @@ class JobQueue:
     
     async def load_pending_jobs(self) -> int:
         """Load pending jobs from database into memory queue."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -262,18 +270,53 @@ class JobQueue:
     
     async def cleanup_old_jobs(self, days: int = 7) -> int:
         """Remove completed/failed jobs older than specified days."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
-            DELETE FROM jobs 
+            DELETE FROM jobs
             WHERE status IN ('completed', 'failed', 'cancelled')
             AND completed_at < datetime('now', ?)
         """, (f"-{days} days",))
-        
+
         deleted = cursor.rowcount
         conn.commit()
         conn.close()
-        
+
         logger.info(f"Cleaned up {deleted} old jobs")
         return deleted
+
+    async def get_current_job(self) -> Job | None:
+        """Get the currently running job."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM jobs
+            WHERE status = 'running'
+            ORDER BY started_at DESC
+            LIMIT 1
+        """)
+
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return self._row_to_job(row)
+        return None
+
+    async def get_recent_jobs(self, limit: int = 10) -> list[Job]:
+        """Get recent jobs (completed, failed, running)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT * FROM jobs
+            WHERE status IN ('completed', 'failed', 'running')
+            ORDER BY COALESCE(completed_at, started_at, created_at) DESC
+            LIMIT ?
+        """, (limit,))
+
+        jobs = [self._row_to_job(row) for row in cursor.fetchall()]
+        conn.close()
+        return jobs

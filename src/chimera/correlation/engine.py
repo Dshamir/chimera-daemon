@@ -89,57 +89,74 @@ class CorrelationEngine:
         self._last_run: datetime | None = None
     
     async def run_correlation(self) -> CorrelationResult:
-        """Run full correlation pipeline."""
+        """Run full correlation pipeline.
+
+        Heavy CPU-intensive work runs in a thread pool executor to avoid
+        blocking the event loop, keeping health checks responsive.
+        """
+        import asyncio
         import time
+        from concurrent.futures import ThreadPoolExecutor
+
         start_time = time.time()
-        
         result = CorrelationResult()
-        
+        loop = asyncio.get_running_loop()
+
         try:
             logger.info("Starting correlation analysis...")
-            
-            # Step 1: Entity consolidation
-            consolidation_start = time.time()
-            entities = self.consolidator.consolidate_all()
-            co_occurrences = self.consolidator.build_co_occurrence_matrix()
-            result.consolidation_time = time.time() - consolidation_start
-            result.entities_consolidated = len(entities)
-            result.co_occurrence_pairs = len(co_occurrences)
-            
-            logger.info(
-                f"Consolidated {result.entities_consolidated} entities, "
-                f"{result.co_occurrence_pairs} co-occurrence pairs"
-            )
-            
-            # Step 2: Pattern detection
-            pattern_start = time.time()
-            patterns = self.pattern_detector.detect_all()
-            result.pattern_time = time.time() - pattern_start
-            result.patterns_detected = len(patterns)
-            
-            logger.info(f"Detected {result.patterns_detected} patterns")
-            
-            # Step 3: Discovery surfacing
-            discovery_start = time.time()
-            discoveries = self.discovery_surfacer.surface_all()
-            result.discovery_time = time.time() - discovery_start
-            result.discoveries_surfaced = len(discoveries)
-            
-            logger.info(f"Surfaced {result.discoveries_surfaced} discoveries")
-            
-            # Log audit
+
+            # Run CPU-intensive work in thread pool to avoid blocking event loop
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                # Step 1: Entity consolidation (in thread)
+                consolidation_start = time.time()
+                entities = await loop.run_in_executor(
+                    executor, self.consolidator.consolidate_all
+                )
+                co_occurrences = await loop.run_in_executor(
+                    executor, self.consolidator.build_co_occurrence_matrix
+                )
+                result.consolidation_time = time.time() - consolidation_start
+                result.entities_consolidated = len(entities)
+                result.co_occurrence_pairs = len(co_occurrences)
+
+                logger.info(
+                    f"Consolidated {result.entities_consolidated} entities, "
+                    f"{result.co_occurrence_pairs} co-occurrence pairs"
+                )
+
+                # Step 2: Pattern detection (in thread)
+                pattern_start = time.time()
+                patterns = await loop.run_in_executor(
+                    executor, self.pattern_detector.detect_all
+                )
+                result.pattern_time = time.time() - pattern_start
+                result.patterns_detected = len(patterns)
+
+                logger.info(f"Detected {result.patterns_detected} patterns")
+
+                # Step 3: Discovery surfacing (in thread)
+                discovery_start = time.time()
+                discoveries = await loop.run_in_executor(
+                    executor, self.discovery_surfacer.surface_all
+                )
+                result.discovery_time = time.time() - discovery_start
+                result.discoveries_surfaced = len(discoveries)
+
+                logger.info(f"Surfaced {result.discoveries_surfaced} discoveries")
+
+            # Log audit (quick operation, fine on main thread)
             self._log_correlation_run(result)
-            
+
             self._last_run = datetime.now()
             result.total_time = time.time() - start_time
-            
+
             logger.info(
                 f"Correlation complete in {result.total_time:.2f}s. "
                 f"Discoveries: {result.discoveries_surfaced}"
             )
-            
+
             return result
-            
+
         except Exception as e:
             logger.error(f"Correlation failed: {e}")
             result.success = False

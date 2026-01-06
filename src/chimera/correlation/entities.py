@@ -215,42 +215,92 @@ class EntityConsolidator:
         
         logger.info(f"Stored {len(self._consolidated)} consolidated entities")
     
-    def build_co_occurrence_matrix(self) -> dict[tuple[str, str], CoOccurrence]:
-        """Build co-occurrence matrix for entities appearing in same files."""
+    def build_co_occurrence_matrix(
+        self,
+        max_entities: int = 50000,
+        max_pairs_per_file: int = 500,
+        max_total_pairs: int = 1000000,
+    ) -> dict[tuple[str, str], CoOccurrence]:
+        """Build co-occurrence matrix for entities appearing in same files.
+
+        Args:
+            max_entities: Maximum entities to consider (for performance)
+            max_pairs_per_file: Maximum entity pairs to consider per file
+            max_total_pairs: Maximum total pairs to track
+        """
         logger.info("Building co-occurrence matrix...")
-        
+
+        # Limit entities if too many (prioritize by occurrence count)
+        entities_to_process = self._consolidated
+        if len(self._consolidated) > max_entities:
+            logger.warning(
+                f"Limiting entities from {len(self._consolidated)} to {max_entities} "
+                f"(sorted by occurrence count)"
+            )
+            sorted_entities = sorted(
+                self._consolidated.items(),
+                key=lambda x: x[1].occurrence_count,
+                reverse=True
+            )[:max_entities]
+            entities_to_process = dict(sorted_entities)
+
         # Group entities by file
         file_entities: dict[str, list[str]] = defaultdict(list)
-        for key, entity in self._consolidated.items():
+        for key, entity in entities_to_process.items():
             for file_id in entity.file_ids:
                 file_entities[file_id].append(key)
-        
-        # Count co-occurrences
+
+        # Count co-occurrences with limits
+        files_processed = 0
+        total_files = len(file_entities)
+
         for file_id, entity_keys in file_entities.items():
-            # Create pairs
+            files_processed += 1
+            if files_processed % 10000 == 0:
+                logger.debug(
+                    f"Co-occurrence progress: {files_processed}/{total_files} files, "
+                    f"{len(self._co_occurrences)} pairs"
+                )
+
+            # Limit pairs per file to avoid explosion
+            pairs_this_file = 0
             for i, key1 in enumerate(entity_keys):
+                if pairs_this_file >= max_pairs_per_file:
+                    break
                 for key2 in entity_keys[i+1:]:
+                    if pairs_this_file >= max_pairs_per_file:
+                        break
+
                     # Sort to ensure consistent ordering
                     pair = tuple(sorted([key1, key2]))
-                    
+
                     if pair not in self._co_occurrences:
+                        if len(self._co_occurrences) >= max_total_pairs:
+                            logger.warning(
+                                f"Reached max pairs limit ({max_total_pairs}), stopping"
+                            )
+                            break
                         self._co_occurrences[pair] = CoOccurrence(
-                            entity1_id=self._consolidated[pair[0]].id,
-                            entity2_id=self._consolidated[pair[1]].id,
+                            entity1_id=entities_to_process[pair[0]].id,
+                            entity2_id=entities_to_process[pair[1]].id,
                         )
-                    
+
                     self._co_occurrences[pair].count += 1
                     self._co_occurrences[pair].file_ids.add(file_id)
-        
+                    pairs_this_file += 1
+
+            if len(self._co_occurrences) >= max_total_pairs:
+                break
+
         # Calculate strength scores
         for pair, co_occ in self._co_occurrences.items():
             # Strength based on count and file diversity
             count_score = min(1.0, co_occ.count / 10)
             diversity_score = min(1.0, len(co_occ.file_ids) / 5)
             co_occ.strength = 0.6 * count_score + 0.4 * diversity_score
-        
+
         logger.info(f"Built co-occurrence matrix with {len(self._co_occurrences)} pairs")
-        
+
         return self._co_occurrences
     
     def get_related_entities(

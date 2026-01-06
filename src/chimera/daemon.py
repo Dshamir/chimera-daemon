@@ -48,6 +48,7 @@ class ChimeraDaemon:
         self.correlation_engine = None
         self._worker_task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None  # Store main event loop
         
         # Stats
         self.files_detected = 0
@@ -56,12 +57,53 @@ class ChimeraDaemon:
         self.jobs_failed = 0
         self.correlations_run = 0
         self.discoveries_surfaced = 0
+        self.patterns_detected = 0
+
+        # Current operation tracking (for both queued and sync operations)
+        self._current_operation: dict | None = None
+        self._operation_start_time: datetime | None = None
+        self._last_correlation_time: float | None = None  # For ETA
     
     @property
     def uptime_seconds(self) -> float:
         if self.started_at is None:
             return 0.0
         return (datetime.now() - self.started_at).total_seconds()
+
+    def start_operation(self, operation_type: str, details: dict | None = None) -> None:
+        """Start tracking a current operation (for dashboard visibility)."""
+        self._current_operation = {
+            "type": operation_type,
+            "details": details or {},
+            "started_at": datetime.now().isoformat(),
+        }
+        self._operation_start_time = datetime.now()
+
+    def end_operation(self) -> None:
+        """End current operation tracking."""
+        self._current_operation = None
+        self._operation_start_time = None
+
+    def get_current_operation(self) -> dict | None:
+        """Get current operation with elapsed time and ETA."""
+        if not self._current_operation:
+            return None
+
+        elapsed = None
+        eta = None
+        if self._operation_start_time:
+            elapsed = (datetime.now() - self._operation_start_time).total_seconds()
+
+            # Calculate ETA for correlation based on historical data
+            if self._current_operation.get("type") == "correlation" and self._last_correlation_time:
+                remaining = max(0, self._last_correlation_time - elapsed)
+                eta = remaining
+
+        return {
+            **self._current_operation,
+            "elapsed_seconds": elapsed,
+            "eta_seconds": eta,
+        }
     
     def _get_pipeline(self):
         if self.pipeline is None:
@@ -80,10 +122,13 @@ class ChimeraDaemon:
     async def start(self) -> None:
         logger.info(f"Starting CHIMERA daemon v{__version__}")
         logger.info(f"Dev mode: {self.dev_mode}")
-        
+
+        # Store event loop reference for thread-safe callbacks
+        self._loop = asyncio.get_running_loop()
+
         config_dir = ensure_config_dir()
         logger.info(f"Config directory: {config_dir}")
-        
+
         self.queue = JobQueue()
         await self.queue.load_pending_jobs()
         pending = await self.queue.get_pending_count()
@@ -126,16 +171,21 @@ class ChimeraDaemon:
         await self._shutdown_event.wait()
     
     def _on_file_change(self, path: Path, event_type: str) -> None:
+        """Handle file change events from watchdog thread."""
         self.files_detected += 1
         logger.debug(f"File {event_type}: {path}")
-        
+
         if event_type in ("created", "modified"):
             job = Job(
                 job_type=JobType.FILE_EXTRACTION,
                 priority=JobPriority.P3_RECENT,
                 payload={"path": str(path), "event": event_type},
             )
-            asyncio.create_task(self._enqueue_job(job))
+            # Use stored event loop reference (thread-safe from watchdog thread)
+            if self._loop is not None and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._enqueue_job(job), self._loop)
+            else:
+                logger.warning(f"Event loop not available, skipping file: {path}")
     
     async def _enqueue_job(self, job: Job) -> None:
         if self.queue:
@@ -171,6 +221,8 @@ class ChimeraDaemon:
     async def _process_job(self, job: Job) -> None:
         if job.job_type == JobType.FILE_EXTRACTION:
             await self._process_file_extraction(job)
+        elif job.job_type == JobType.BATCH_EXTRACTION:
+            await self._process_batch_extraction(job)
         elif job.job_type == JobType.FAE_PROCESSING:
             await self._process_fae(job)
         elif job.job_type == JobType.CORRELATION:
@@ -222,19 +274,25 @@ class ChimeraDaemon:
     
     async def _process_correlation(self, job: Job) -> None:
         logger.info("Running correlation analysis...")
-        
-        engine = self._get_correlation_engine()
-        result = await engine.run_correlation()
-        
-        if result.success:
-            self.correlations_run += 1
-            self.discoveries_surfaced = result.discoveries_surfaced
-            logger.info(
-                f"Correlation complete: {result.patterns_detected} patterns, "
-                f"{result.discoveries_surfaced} discoveries"
-            )
-        else:
-            logger.error(f"Correlation failed: {result.error}")
+        self.start_operation("correlation", {"source": "queued_job", "job_id": job.id})
+
+        try:
+            engine = self._get_correlation_engine()
+            result = await engine.run_correlation()
+
+            if result.success:
+                self.correlations_run += 1
+                self.discoveries_surfaced = result.discoveries_surfaced
+                self.patterns_detected = result.patterns_detected
+                self._last_correlation_time = result.total_time  # For ETA
+                logger.info(
+                    f"Correlation complete: {result.patterns_detected} patterns, "
+                    f"{result.discoveries_surfaced} discoveries"
+                )
+            else:
+                logger.error(f"Correlation failed: {result.error}")
+        finally:
+            self.end_operation()
     
     async def _process_discovery(self, job: Job) -> None:
         logger.info("Surfacing discoveries...")
@@ -242,15 +300,183 @@ class ChimeraDaemon:
         discoveries = engine.discovery_surfacer.surface_all()
         self.discoveries_surfaced = len(discoveries)
         logger.info(f"Surfaced {len(discoveries)} discoveries")
+
+    async def _process_batch_extraction(self, job: Job) -> None:
+        """Process batch extraction (excavation) - discover and queue files."""
+        scope = job.payload.get("scope", {})
+        explicit_paths = job.payload.get("paths")
+
+        logger.info(f"Starting batch extraction. Scope: {scope}")
+
+        files_queued = 0
+
+        # Process explicit paths if provided
+        if explicit_paths:
+            logger.info(f"Processing {len(explicit_paths)} explicit paths")
+            for p in explicit_paths:
+                path = Path(p)
+                if path.exists():
+                    if path.is_file():
+                        await self._queue_file_extraction(path)
+                        files_queued += 1
+                    elif path.is_dir():
+                        # Recursively find files in directory
+                        for file in self._discover_files_in_path(path):
+                            await self._queue_file_extraction(file)
+                            files_queued += 1
+                else:
+                    logger.warning(f"Path does not exist: {path}")
+
+        # Discover files from configured sources if no explicit paths and files enabled
+        elif scope.get("files", True):
+            logger.info("Discovering files from configured sources...")
+            for file in self._discover_source_files():
+                await self._queue_file_extraction(file)
+                files_queued += 1
+
+        logger.info(f"Queued {files_queued} files for extraction")
+
+        # Process FAE exports if requested
+        if scope.get("fae", True) and self.config.fae.enabled:
+            fae_queued = 0
+            for fae_path_str in self.config.fae.watch_paths:
+                fae_path = Path(fae_path_str)
+                if fae_path.exists():
+                    for export_file in self._discover_fae_exports(fae_path):
+                        fae_job = Job(
+                            job_type=JobType.FAE_PROCESSING,
+                            priority=JobPriority.P2_FAE,
+                            payload={"path": str(export_file), "provider": "auto"},
+                        )
+                        await self.queue.enqueue(fae_job)
+                        fae_queued += 1
+            if fae_queued:
+                logger.info(f"Queued {fae_queued} FAE exports for processing")
+
+        # Queue correlation if requested
+        if scope.get("correlate", True):
+            corr_job = Job(
+                job_type=JobType.CORRELATION,
+                priority=JobPriority.P4_SCHEDULED,  # Lower priority, runs after extractions
+                payload={},
+            )
+            await self.queue.enqueue(corr_job)
+            logger.info("Queued correlation analysis")
+
+    async def _queue_file_extraction(self, path: Path) -> None:
+        """Queue a single file for extraction."""
+        file_job = Job(
+            job_type=JobType.FILE_EXTRACTION,
+            priority=JobPriority.P2_FAE,
+            payload={"path": str(path), "event": "excavate"},
+        )
+        await self.queue.enqueue(file_job)
+
+    def _discover_source_files(self) -> list[Path]:
+        """Discover files from configured sources."""
+        import fnmatch
+
+        files = []
+        for source in self.config.sources:
+            if not source.enabled:
+                continue
+            source_path = Path(source.path)
+            if not source_path.exists():
+                logger.warning(f"Source path does not exist: {source_path}")
+                continue
+
+            logger.debug(f"Scanning source: {source_path}")
+
+            # Build glob patterns based on file types
+            extensions = source.file_types or ["*"]
+            for ext in extensions:
+                pattern = f"**/*.{ext}" if source.recursive else f"*.{ext}"
+                try:
+                    for file in source_path.glob(pattern):
+                        if file.is_file() and self._should_include_file(file):
+                            files.append(file)
+                except PermissionError:
+                    logger.debug(f"Permission denied: {source_path}")
+                except Exception as e:
+                    logger.debug(f"Error scanning {source_path}: {e}")
+
+        logger.info(f"Discovered {len(files)} files from {len(self.config.sources)} sources")
+        return files
+
+    def _discover_files_in_path(self, directory: Path) -> list[Path]:
+        """Discover all supported files in a directory."""
+        files = []
+        try:
+            for file in directory.rglob("*"):
+                if file.is_file() and self._should_include_file(file):
+                    files.append(file)
+        except PermissionError:
+            logger.debug(f"Permission denied: {directory}")
+        return files
+
+    def _discover_fae_exports(self, fae_path: Path) -> list[Path]:
+        """Discover FAE export files (JSON/HTML conversation exports)."""
+        exports = []
+        patterns = ["*.json", "*.html"]
+        for pattern in patterns:
+            try:
+                for file in fae_path.glob(pattern):
+                    if file.is_file():
+                        exports.append(file)
+            except PermissionError:
+                pass
+        return exports
+
+    def _should_include_file(self, file: Path) -> bool:
+        """Check if a file should be included based on exclusion rules."""
+        import fnmatch
+
+        file_str = str(file)
+
+        # Check path exclusions
+        for pattern in self.config.exclude.paths:
+            if fnmatch.fnmatch(file_str, pattern):
+                return False
+
+        # Check filename pattern exclusions
+        for pattern in self.config.exclude.patterns:
+            if fnmatch.fnmatch(file.name, pattern):
+                return False
+
+        # Check size limit
+        try:
+            size_limit = self._parse_size(self.config.exclude.size_max)
+            if file.stat().st_size > size_limit:
+                return False
+        except (OSError, ValueError):
+            pass
+
+        return True
+
+    def _parse_size(self, size_str: str) -> int:
+        """Parse size string like '100MB' to bytes."""
+        size_str = size_str.strip().upper()
+        multipliers = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
+        for suffix, mult in multipliers.items():
+            if size_str.endswith(suffix):
+                return int(size_str[:-len(suffix)]) * mult
+        return int(size_str)
     
     def get_status(self) -> dict:
         catalog_stats = {}
         vector_stats = {}
         correlation_stats = {}
-        
+
+        try:
+            # Always get catalog stats from database (even if pipeline not initialized)
+            from chimera.storage.catalog import CatalogDB
+            catalog = CatalogDB()
+            catalog_stats = catalog.get_stats()
+        except Exception:
+            pass
+
         try:
             if self.pipeline:
-                catalog_stats = self.pipeline.catalog.get_stats()
                 vector_stats = self.pipeline.vectors.get_stats()
             if self.correlation_engine:
                 correlation_stats = self.correlation_engine.get_stats()
@@ -269,6 +495,7 @@ class ChimeraDaemon:
                 "jobs_processed": self.jobs_processed,
                 "jobs_failed": self.jobs_failed,
                 "correlations_run": self.correlations_run,
+                "patterns_detected": self.patterns_detected,
                 "discoveries_surfaced": self.discoveries_surfaced,
             },
             "catalog": catalog_stats,
