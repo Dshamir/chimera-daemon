@@ -212,18 +212,34 @@ class ChimeraShell:
         )
     
     def print_banner(self):
-        """Print welcome banner."""
+        """Print welcome banner with commands."""
         banner = """
-   ██████╗██╗  ██╗██╗███╗   ███╗███████╗██████╗  █████╗ 
-  ██╔════╝██║  ██║██║████╗ ████║██╔════╝██╔══██╗██╔══██╗
-  ██║     ███████║██║██╔████╔██║█████╗  ██████╔╝███████║
-  ██║     ██╔══██║██║██║╚██╔╝██║██╔══╝  ██╔══██╗██╔══██║
-  ╚██████╗██║  ██║██║██║ ╚═╝ ██║███████╗██║  ██║██║  ██║
-   ╚═════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
+   [bold cyan]██████╗██╗  ██╗██╗███╗   ███╗███████╗██████╗  █████╗[/bold cyan] 
+  [bold cyan]██╔════╝██║  ██║██║████╗ ████║██╔════╝██╔══██╗██╔══██╗[/bold cyan]
+  [bold cyan]██║     ███████║██║██╔████╔██║█████╗  ██████╔╝███████║[/bold cyan]
+  [bold cyan]██║     ██╔══██║██║██║╚██╔╝██║██╔══╝  ██╔══██╗██╔══██║[/bold cyan]
+  [bold cyan]╚██████╗██║  ██║██║██║ ╚═╝ ██║███████╗██║  ██║██║  ██║[/bold cyan]
+   [bold cyan]╚═════╝╚═╝  ╚═╝╚═╝╚═╝     ╚═╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝[/bold cyan]
         """
-        console.print(banner, style="bold cyan")
-        console.print(f"  [dim]Cognitive History Integration & Memory Extraction[/dim]")
-        console.print(f"  [dim]Version {__version__} | Type /help for commands[/dim]\n")
+        console.print(banner)
+        console.print(f"  [dim]Cognitive History Integration & Memory Extraction v{__version__}[/dim]")
+        console.print()
+        
+        # Commands quick reference
+        console.print("  [bold white]COMMANDS[/bold white]")
+        console.print("  ─────────────────────────────────────────────────────────────")
+        console.print("  [cyan]/status[/cyan]    Status     [cyan]/search[/cyan] <q>  Search    [cyan]/index[/cyan] <path>  Index file")
+        console.print("  [cyan]/start[/cyan]     Start      [cyan]/q[/cyan] <query>   Quick search [cyan]/excavate[/cyan]     Full scan")
+        console.print("  [cyan]/stop[/cyan]      Stop       [cyan]/correlate[/cyan]   Analyze   [cyan]/fae[/cyan] <path>    AI exports")
+        console.print("  ─────────────────────────────────────────────────────────────")
+        console.print("  [cyan]/patterns[/cyan]  Patterns   [cyan]/entities[/cyan]    Entities  [cyan]/discoveries[/cyan]   Insights")
+        console.print("  [cyan]/config[/cyan]    Config     [cyan]/sources[/cyan]     Sources   [cyan]/add-source[/cyan]    Add path")
+        console.print("  ─────────────────────────────────────────────────────────────")
+        console.print("  [cyan]/logs[/cyan]      Logs       [cyan]/sessions[/cyan]    History   [cyan]/stats[/cyan]         Analytics")
+        console.print("  [cyan]/clear[/cyan]     Clear      [cyan]/help[/cyan]        Help      [cyan]/exit[/cyan]          Quit")
+        console.print("  ─────────────────────────────────────────────────────────────")
+        console.print("  [dim]💡 Just type to search! Tab for autocomplete. ↑↓ for history.[/dim]")
+        console.print()
     
     def print_status_bar(self):
         """Print current status."""
