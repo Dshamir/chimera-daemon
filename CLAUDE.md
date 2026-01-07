@@ -28,17 +28,30 @@ chimera-daemon/
 ├── src/chimera/
 │   ├── daemon.py           # Main orchestrator
 │   ├── cli.py              # Full CLI (Sprint 4)
+│   ├── telemetry.py        # Real-time dashboard
 │   ├── extractors/         # Content extraction
+│   │   ├── image.py        # EXIF, GPS, thumbnails, AI vision
+│   │   └── audio.py        # Audio metadata, transcription
+│   ├── ai/                 # AI integrations
+│   │   └── vision.py       # OpenAI, Claude, BLIP-2 vision
 │   ├── storage/            # SQLite + ChromaDB
 │   ├── correlation/        # Intelligence layer
-│   │   ├── engine.py       # Orchestrator
+│   │   ├── engine.py       # Orchestrator (ThreadPoolExecutor)
 │   │   ├── entities.py     # Consolidation
 │   │   ├── patterns.py     # Detection
 │   │   └── discovery.py    # Unknown knowns
 │   ├── integration/        # External integrations
 │   │   ├── claude.py       # Claude context builder
 │   │   └── mcp.py          # MCP server
+│   ├── usb/                # USB excavation
+│   │   ├── excavator.py    # USB device scanning
+│   │   └── telemetry.py    # Standalone USB telemetry
+│   ├── gpu/                # GPU utilities
+│   │   └── vectors.py      # GPU-accelerated embeddings
+│   ├── sync/               # Graph sync utilities
+│   │   └── discovery.py    # Discovery sync
 │   └── api/                # FastAPI server
+├── usb-package/            # Standalone USB excavator
 └── tests/
 ```
 
@@ -506,6 +519,46 @@ After first correlation run, timing is saved. Subsequent correlations show:
   [CLI: --now]
 ```
 
+### 2026-01-07 — PR #1 Multimedia Extraction Pipeline Merge
+
+Merged `usb-excavator` branch into main, combining:
+- **Main branch**: Daemon responsiveness (ThreadPoolExecutor), telemetry dashboard, psutil
+- **USB-excavator**: Multimedia extractors, AI vision providers, USB excavator
+
+#### New Modules Added
+
+| Module | Purpose |
+|--------|---------|
+| `src/chimera/ai/vision.py` | AI vision providers (OpenAI, Claude, BLIP-2) |
+| `src/chimera/extractors/audio.py` | Audio metadata, transcription |
+| `src/chimera/usb/` | USB device detection and excavation |
+| `src/chimera/gpu/` | GPU utilities for embeddings |
+| `src/chimera/sync/` | Graph sync utilities |
+| `usb-package/` | Standalone USB excavator package |
+
+#### Image Extractor Enhancements
+
+From USB-excavator branch:
+- EXIF metadata extraction (camera, settings, date)
+- GPS coordinate parsing with reverse geocoding
+- Thumbnail generation
+- AI vision integration (multi-provider fallback)
+
+#### Merge Conflict Resolution
+
+Only `pyproject.toml` had conflicts:
+- Kept `psutil>=5.9.0` from main
+- Added `prompt_toolkit>=3.0.0` from USB-excavator
+- Python version already set to 3.10+ for WSL compatibility
+
+#### Preserved from Main
+
+All daemon responsiveness fixes preserved:
+- `ThreadPoolExecutor` for non-blocking correlation
+- `start_operation()` / `end_operation()` tracking
+- ETA calculation based on historical timing
+- Real-time telemetry via nvidia-smi and psutil
+
 #### Dashboard Layout (Final)
 
 ```
@@ -560,9 +613,14 @@ After first correlation run, timing is saved. Subsequent correlations show:
 | `telemetry.py` | Real-time dashboard (Rich library) |
 | `api/routes/control.py` | API endpoints, telemetry endpoint |
 | `extractors/pipeline.py` | Extraction orchestrator |
+| `extractors/image.py` | EXIF, GPS, thumbnails, AI vision |
+| `extractors/audio.py` | Audio metadata, transcription |
+| `ai/vision.py` | OpenAI, Claude, BLIP-2 vision providers |
 | `correlation/engine.py` | Correlation orchestrator (ThreadPoolExecutor) |
 | `storage/catalog.py` | SQLite catalog, entity stats |
 | `queue.py` | Job queue, current/recent jobs |
+| `usb/excavator.py` | USB device scanning |
+| `gpu/vectors.py` | GPU-accelerated embeddings |
 | `integration/claude.py` | Claude context builder |
 | `integration/mcp.py` | MCP server |
 
