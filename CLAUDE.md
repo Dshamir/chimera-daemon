@@ -55,15 +55,30 @@ chimera-daemon/
 └── tests/
 ```
 
-## All Sprints Complete ✅
+## Current Data Statistics
+
+| Metric | Value |
+|--------|-------|
+| Files Indexed | 59,122 |
+| Content Size | 1.74 GB |
+| Chunks Created | 916,675 |
+| Raw Entities | 6,607,007 |
+| Unique Entities | 525,589 (92% dedup) |
+| Patterns Detected | 23,133 |
+| Discoveries | 15,443 |
+| Vector DB Size | 9.7 GB |
+| Catalog DB Size | 3.3 GB |
+
+## Sprint Status
 
 | Sprint | Focus | Status |
 |--------|-------|--------|
-| 0 | Foundation | ✅ |
-| 1 | Core Daemon | ✅ |
-| 2 | Extractors & Index | ✅ |
-| 3 | Correlation Engine | ✅ |
-| 4 | Integration & Polish | ✅ |
+| 0 | Foundation | ✅ Complete |
+| 1 | Core Daemon | ✅ Complete |
+| 2 | Extractors & Index | ✅ Complete |
+| 3 | Correlation Engine | ✅ Complete |
+| 4 | Integration & Polish | ✅ Complete |
+| 5 | Bug Fixes & Hardening | ✅ In Progress |
 
 ## Sprint 4 Deliverables
 
@@ -519,6 +534,67 @@ After first correlation run, timing is saved. Subsequent correlations show:
   [CLI: --now]
 ```
 
+### 2026-01-08 — Sprint 5: Bug Fixes & Hardening
+
+Critical bug fixes for multimedia metadata storage and improved error handling.
+
+#### Issue 7: Image Metadata Storage Fails
+
+**Symptom:**
+```
+ERROR: CatalogDB.add_image_metadata() got an unexpected keyword argument 'file_id'
+```
+
+**Root Cause:** API signature mismatch between pipeline and catalog:
+- `pipeline.py` called `add_image_metadata(file_id=..., width=..., ...)` with keyword args
+- `catalog.py` expected `add_image_metadata(record: ImageMetadataRecord)` with dataclass
+
+**Fix:** Updated `pipeline.py` to construct dataclass instances:
+```python
+# BEFORE (broken):
+self.catalog.add_image_metadata(file_id=file_id, width=...)
+
+# AFTER (correct):
+record = ImageMetadataRecord(file_id=file_id, width=...)
+self.catalog.add_image_metadata(record)
+```
+
+**Files Modified:** `src/chimera/extractors/pipeline.py` lines 261-330
+
+#### Issue 8: Audio Metadata Same Pattern
+
+Same API mismatch for `add_audio_metadata()`. Fixed by constructing `AudioMetadataRecord`.
+
+**File Modified:** `src/chimera/extractors/pipeline.py` lines 332-379
+
+#### Issue 9: GPS Location Same Pattern
+
+Same API mismatch for `add_gps_location()`. Fixed by constructing `GPSLocationRecord`.
+
+**File Modified:** `src/chimera/extractors/pipeline.py` lines 312-324
+
+#### Issue 10: Silent Failures Masking Bugs
+
+**Symptom:** Errors logged but processing continued, making bugs hard to detect.
+
+**Root Cause:** Exception handlers used `logger.warning()` and continued execution.
+
+**Fix:** Changed to `logger.error()` + `raise` for proper error propagation:
+```python
+except Exception as e:
+    logger.error(f"Failed to store image metadata for {file_path}: {e}")
+    raise  # Re-raise to make failure visible
+```
+
+#### New Tests Added
+
+Created `tests/test_multimedia.py` with integration tests for:
+- `ImageMetadataRecord` dataclass creation and storage
+- `AudioMetadataRecord` dataclass creation and storage
+- `GPSLocationRecord` dataclass creation and storage
+- Pipeline multimedia storage methods
+- Error handling (fail fast, not silent)
+
 ### 2026-01-07 — PR #1 Multimedia Extraction Pipeline Merge
 
 Merged `usb-excavator` branch into main, combining:
@@ -623,6 +699,96 @@ All daemon responsiveness fixes preserved:
 | `gpu/vectors.py` | GPU-accelerated embeddings |
 | `integration/claude.py` | Claude context builder |
 | `integration/mcp.py` | MCP server |
+
+---
+
+## Known Issues & Troubleshooting
+
+### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `database is locked` | SQLite concurrent access | Restart daemon, wait for operations to complete |
+| `no running event loop` | Thread calling async code | Use `asyncio.run_coroutine_threadsafe()` |
+| `unexpected keyword argument` | API signature mismatch | Construct dataclass, don't pass kwargs |
+| `Daemon not responding` | Heavy operation blocking | Wait for correlation to complete (check dashboard) |
+| `Connection refused :7777` | Daemon not running | Start with `chimera serve --dev` |
+
+### Health Check Troubleshooting
+
+```bash
+# Quick check if daemon is running
+chimera ping
+
+# Full health check with details
+chimera health
+
+# Check via API directly
+curl http://127.0.0.1:7777/api/v1/health
+
+# Check readiness (all systems initialized)
+curl http://127.0.0.1:7777/api/v1/readiness
+```
+
+### Database Issues
+
+```bash
+# Check database sizes
+ls -lh ~/.chimera/*.db
+
+# Verify catalog integrity
+sqlite3 ~/.chimera/catalog.db "PRAGMA integrity_check"
+
+# Check current journal mode (should be WAL)
+sqlite3 ~/.chimera/catalog.db "PRAGMA journal_mode"
+
+# Set WAL mode if needed
+sqlite3 ~/.chimera/catalog.db "PRAGMA journal_mode=WAL"
+
+# Check for stale lock files
+ls ~/.chimera/*.db-*
+```
+
+### Correlation Taking Too Long
+
+With 6.6M entities, correlation takes ~3 minutes. During this time:
+- Health checks may be slow (but responsive due to ThreadPoolExecutor fix)
+- Use dashboard to monitor progress: `chimera dashboard`
+- Check ETA in current operation panel
+
+### Multimedia Not Being Processed
+
+If images/audio are detected but metadata not stored:
+1. Check logs for errors: `chimera logs`
+2. Verify extractors registered: Check `get_registry().list_extractors()`
+3. Ensure file extensions match extractor patterns
+
+### Development vs Production
+
+| Feature | `--dev` Mode | Production |
+|---------|--------------|------------|
+| Hot reload | Yes | No |
+| Debug logging | Yes | No |
+| Auto-restart | No | Recommended (systemd) |
+| Port | 7777 | Configurable |
+
+### Deployment Options
+
+**Option 1: Virtual Environment (Development)**
+```bash
+python -m venv venv
+source venv/bin/activate  # or venv\Scripts\activate on Windows
+pip install -e ".[dev]"
+chimera serve --dev
+```
+
+**Option 2: Docker (Production)**
+```bash
+docker build -t chimera-daemon .
+docker run -v ~/.chimera:/root/.chimera -p 7777:7777 chimera-daemon
+```
+
+Note: These are **separate deployment options**, not nested. The venv is for local development, Docker is for production deployment.
 
 ---
 

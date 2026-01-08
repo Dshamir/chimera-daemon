@@ -148,25 +148,110 @@ GET  /api/v1/jobs/current     # Current operation
 - [PRD](https://github.com/Dshamir/sif-knowledge-base/tree/main/projects/chimera-prd) — Full Product Requirements Document
 - [A7.2 FAE Protocol](https://github.com/Dshamir/sif-knowledge-base/blob/main/amendments/A7.2-full-archaeology-excavation-protocol.md) — AI export detection and processing
 
+## Current Data (Example)
+
+After excavating a developer's file system:
+
+| Metric | Value |
+|--------|-------|
+| Files Indexed | 59,122 |
+| Chunks Created | 916,675 |
+| Entities Extracted | 6.6M (525K unique) |
+| Patterns Detected | 23,133 |
+| Discoveries Surfaced | 15,443 |
+| Catalog DB | 3.3 GB |
+| Vector DB | 9.7 GB |
+
+## Deployment Options
+
+### Option 1: Virtual Environment (Development)
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+# or: venv\Scripts\activate  # Windows
+
+# Install in development mode
+pip install -e ".[dev]"
+
+# Start daemon
+chimera serve --dev
+```
+
+### Option 2: Docker (Production)
+
+```bash
+# Build container
+docker build -t chimera-daemon .
+
+# Run with data persistence
+docker run -v ~/.chimera:/root/.chimera -p 7777:7777 chimera-daemon
+```
+
+**Note:** These are separate deployment options. The venv is for local development, Docker is for production. They are NOT nested.
+
+## Troubleshooting
+
+### Common Issues
+
+| Error | Solution |
+|-------|----------|
+| `Connection refused :7777` | Start daemon: `chimera serve --dev` |
+| `database is locked` | Restart daemon, wait for operations to complete |
+| `Daemon not responding` | Heavy operation in progress - check `chimera dashboard` |
+
+### Health Checks
+
+```bash
+chimera ping           # Quick check (colored dot)
+chimera health         # Detailed health
+chimera dashboard      # Live monitoring
+```
+
+### Database Issues
+
+```bash
+# Check database sizes
+ls -lh ~/.chimera/*.db
+
+# Verify integrity
+sqlite3 ~/.chimera/catalog.db "PRAGMA integrity_check"
+
+# Check journal mode (should be WAL)
+sqlite3 ~/.chimera/catalog.db "PRAGMA journal_mode"
+```
+
+### Correlation Performance
+
+With 6.6M entities, correlation takes ~3 minutes. The daemon remains responsive during correlation (ThreadPoolExecutor). Monitor progress with `chimera dashboard`.
+
 ## Status
 
 **Version:** 0.1.0
-**Status:** All Sprints Complete
-**Python:** 3.11+
+**Python:** 3.10+ (WSL compatible)
 
 | Sprint | Focus | Status |
 |--------|-------|--------|
-| 0 | Foundation | Complete |
-| 1 | Core Daemon | Complete |
-| 2 | Extractors & Index | Complete |
-| 3 | Correlation Engine | Complete |
-| 4 | Integration & Polish | Complete |
+| 0 | Foundation | ✅ Complete |
+| 1 | Core Daemon | ✅ Complete |
+| 2 | Extractors & Index | ✅ Complete |
+| 3 | Correlation Engine | ✅ Complete |
+| 4 | Integration & Polish | ✅ Complete |
+| 5 | Bug Fixes & Hardening | 🔄 In Progress |
+
+### Recent Fixes (Sprint 5)
+
+- Fixed multimedia metadata storage (image, audio, GPS)
+- Improved error handling (fail fast, not silent)
+- Added integration tests for multimedia pipeline
 
 ## Requirements
 
-- Python 3.11+
+- Python 3.10+
 - NVIDIA GPU (optional, for faster embeddings)
-- ~4GB disk space for vectors
+- ~10GB disk space for vectors + catalog
+- psutil (for system monitoring)
 
 ## License
 
@@ -174,4 +259,4 @@ MIT
 
 ---
 
-*"We do this right or we don't do it."*
+*"Surface what you know but don't know you know."*

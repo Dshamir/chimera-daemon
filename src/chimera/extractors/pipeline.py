@@ -18,7 +18,10 @@ from chimera.extractors.chunker import Chunk, CodeChunker, TextChunker
 from chimera.extractors.embeddings import EmbeddingGenerator, get_embedding_generator
 from chimera.extractors.entities import EntityExtractor, get_entity_extractor
 from chimera.extractors.registry import get_extractor
-from chimera.storage.catalog import CatalogDB, ChunkRecord, EntityRecord, FileRecord
+from chimera.storage.catalog import (
+    CatalogDB, ChunkRecord, EntityRecord, FileRecord,
+    ImageMetadataRecord, AudioMetadataRecord, GPSLocationRecord,
+)
 from chimera.storage.vectors import VectorDB
 from chimera.utils.hashing import generate_id, hash_file
 from chimera.utils.logging import get_logger
@@ -98,7 +101,10 @@ class ExtractionPipeline:
                 return result
             
             result.word_count = extraction.word_count
-            
+
+            # Step 2.5: Store multimedia metadata if applicable
+            self._store_multimedia_metadata(file_id, file_path, extraction)
+
             # Step 3: Create/update file record
             file_record = self._create_file_record(file_id, file_path, extraction)
             self.catalog.add_file(file_record)
@@ -241,7 +247,137 @@ class ExtractionPipeline:
             entity_id=file_id,
             details=str(file_path),
         )
-    
+
+    def _store_multimedia_metadata(self, file_id: str, file_path: Path, extraction: ExtractionResult) -> None:
+        """Store multimedia-specific metadata based on file type."""
+        metadata = extraction.metadata
+        file_type = metadata.get("file_type")
+
+        if file_type == "image":
+            self._store_image_metadata(file_id, file_path, metadata)
+        elif file_type == "audio":
+            self._store_audio_metadata(file_id, file_path, metadata)
+
+    def _store_image_metadata(self, file_id: str, file_path: Path, metadata: dict) -> None:
+        """Store image-specific metadata."""
+        try:
+            exif = metadata.get("exif", {}) or {}
+            gps = metadata.get("gps", {}) or {}
+            dimensions = metadata.get("dimensions", {}) or {}
+            ai = metadata.get("ai", {}) or {}
+
+            # Extract camera info
+            camera = exif.get("camera", {}) or {}
+            settings = exif.get("settings", {}) or {}
+            timestamps = exif.get("timestamps", {}) or {}
+
+            # Parse date_taken from EXIF
+            date_taken = None
+            date_str = timestamps.get("date_taken")
+            if date_str:
+                try:
+                    date_taken = datetime.strptime(date_str, "%Y:%m:%d %H:%M:%S")
+                except (ValueError, TypeError):
+                    pass
+
+            # Construct ImageMetadataRecord dataclass
+            record = ImageMetadataRecord(
+                file_id=file_id,
+                width=dimensions.get("width"),
+                height=dimensions.get("height"),
+                format=file_path.suffix.lstrip(".").upper(),
+                color_mode=None,  # Not extracted yet
+                camera_make=camera.get("make"),
+                camera_model=camera.get("model"),
+                lens=camera.get("lens"),
+                iso=settings.get("iso"),
+                aperture=settings.get("aperture"),
+                shutter_speed=settings.get("shutter_speed"),
+                focal_length=settings.get("focal_length"),
+                date_taken=date_taken,
+                latitude=gps.get("latitude"),
+                longitude=gps.get("longitude"),
+                altitude=gps.get("altitude"),
+                location_name=gps.get("location_name"),
+                ai_description=ai.get("description"),
+                ai_categories=ai.get("categories"),
+                ai_objects=ai.get("objects"),
+                ai_provider=ai.get("provider"),
+                thumbnail_path=metadata.get("thumbnail"),
+                ocr_text=metadata.get("ocr_text"),
+            )
+            self.catalog.add_image_metadata(record)
+
+            # Store GPS location for correlation
+            if gps.get("latitude") and gps.get("longitude"):
+                gps_id = generate_id("gps", f"{file_id}_{gps['latitude']}_{gps['longitude']}")
+                gps_record = GPSLocationRecord(
+                    id=gps_id,
+                    file_id=file_id,
+                    latitude=gps["latitude"],
+                    longitude=gps["longitude"],
+                    location_name=gps.get("location_name"),
+                    country=gps.get("country"),
+                    city=gps.get("city"),
+                    captured_at=date_taken,
+                )
+                self.catalog.add_gps_location(gps_record)
+
+            logger.debug(f"Stored image metadata for {file_path.name}")
+
+        except Exception as e:
+            logger.error(f"Failed to store image metadata for {file_path}: {e}")
+            raise  # Re-raise to make failure visible
+
+    def _store_audio_metadata(self, file_id: str, file_path: Path, metadata: dict) -> None:
+        """Store audio-specific metadata."""
+        try:
+            tags = metadata.get("tags", {}) or {}
+            transcription = metadata.get("transcription", {}) or {}
+
+            # Parse year from tags
+            year = None
+            if tags.get("year"):
+                try:
+                    year = int(str(tags["year"])[:4])
+                except (ValueError, TypeError):
+                    pass
+
+            # Parse track number
+            track_number = None
+            if tags.get("track_number"):
+                try:
+                    track_number = int(tags["track_number"])
+                except (ValueError, TypeError):
+                    pass
+
+            # Construct AudioMetadataRecord dataclass
+            record = AudioMetadataRecord(
+                file_id=file_id,
+                duration_seconds=metadata.get("duration_seconds"),
+                duration_formatted=metadata.get("duration_formatted"),
+                bitrate=metadata.get("bitrate"),
+                sample_rate=metadata.get("sample_rate"),
+                channels=metadata.get("channels"),
+                codec=metadata.get("codec"),
+                title=tags.get("title"),
+                artist=tags.get("artist"),
+                album=tags.get("album"),
+                genre=tags.get("genre"),
+                year=year,
+                track_number=track_number,
+                transcription_status=transcription.get("status", "pending"),
+                transcription_text=transcription.get("text"),
+                transcription_provider=transcription.get("provider"),
+            )
+            self.catalog.add_audio_metadata(record)
+
+            logger.debug(f"Stored audio metadata for {file_path.name}")
+
+        except Exception as e:
+            logger.error(f"Failed to store audio metadata for {file_path}: {e}")
+            raise  # Re-raise to make failure visible
+
     async def process_batch(self, file_paths: list[Path]) -> list[PipelineResult]:
         """Process multiple files."""
         results = []

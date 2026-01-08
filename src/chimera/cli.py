@@ -15,7 +15,16 @@ from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
 from chimera import __version__
-from chimera.config import ensure_config_dir, get_default_config, load_config, save_config
+from chimera.config import (
+    ensure_config_dir,
+    get_config_path,
+    get_default_config,
+    get_nested_value,
+    load_config,
+    save_config,
+    set_nested_value,
+    test_api_keys,
+)
 
 console = Console()
 
@@ -130,6 +139,17 @@ def serve(dev: bool, host: str, port: int) -> None:
 
     from chimera.daemon import run_daemon
     run_daemon(host=host, port=port, dev_mode=dev)
+
+
+@main.command()
+def shell() -> None:
+    """Start the interactive CHIMERA shell.
+
+    The shell provides an interactive interface with auto-starting daemon,
+    command history, and tab completion.
+    """
+    from chimera.shell import main as shell_main
+    shell_main()
 
 
 @main.command()
@@ -643,26 +663,130 @@ def fae_command(path: str | None, provider: str, correlate: bool) -> None:
         console.print(f"\n[red]Error: {result.get('error', 'Unknown error')}[/red]")
 
 
-@main.command()
-def config() -> None:
+@main.group(invoke_without_command=True)
+@click.pass_context
+def config(ctx) -> None:
+    """Configuration management.
+
+    Without subcommand, shows current configuration.
+    """
+    if ctx.invoked_subcommand is None:
+        # Default behavior: show config
+        ctx.invoke(config_show)
+
+
+@config.command("show")
+def config_show() -> None:
     """Show current configuration."""
     cfg = load_config()
-    
+
     console.print(Panel.fit("[bold]CHIMERA Configuration[/bold]", border_style="cyan"))
-    
+
     console.print(f"\n[cyan]Version:[/cyan] {cfg.version}")
-    
+
     console.print(f"\n[cyan]Sources ({len(cfg.sources)}):[/cyan]")
-    for s in cfg.sources:
+    for i, s in enumerate(cfg.sources):
         status = "✅" if s.enabled else "❌"
-        console.print(f"  {status} {s.path} ({s.priority})")
-    
+        depth = f" (depth: {s.max_depth})" if s.max_depth else ""
+        console.print(f"  {status} [{i}] {s.path} ({s.priority}){depth}")
+
+    console.print(f"\n[cyan]Vision:[/cyan]")
+    console.print(f"  Provider: {cfg.vision.provider}")
+    console.print(f"  Fallback: {', '.join(cfg.vision.fallback_providers)}")
+    console.print(f"  Enabled: {'✅' if cfg.vision.enabled else '❌'}")
+
+    console.print(f"\n[cyan]API Keys:[/cyan]")
+    for provider in ["openai", "anthropic", "google"]:
+        key = cfg.api_keys.get_key(provider)
+        if key:
+            masked = key[:8] + "..." + key[-4:] if len(key) > 16 else "***"
+            console.print(f"  {provider}: [green]✓[/green] {masked}")
+        else:
+            console.print(f"  {provider}: [dim]not set[/dim]")
+
     console.print(f"\n[cyan]FAE:[/cyan]")
     console.print(f"  Enabled: {'✅' if cfg.fae.enabled else '❌'}")
     if cfg.fae.watch_paths:
         console.print(f"  Watch: {', '.join(cfg.fae.watch_paths)}")
-    
+
     console.print(f"\n[cyan]API:[/cyan] {cfg.api.host}:{cfg.api.port}")
+
+    console.print(f"\n[dim]Config file: {get_config_path()}[/dim]")
+
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str) -> None:
+    """Set a configuration value.
+
+    Examples:
+        chimera config set vision.provider claude
+        chimera config set sources.0.max_depth 5
+        chimera config set api_keys.openai sk-xxx
+    """
+    cfg = load_config()
+
+    try:
+        set_nested_value(cfg, key, value)
+        save_config(cfg)
+        print_success(f"Set {key} = {value}")
+    except KeyError as e:
+        print_error(f"Invalid config key: {key}", str(e))
+    except ValueError as e:
+        print_error(f"Invalid value for {key}", str(e))
+
+
+@config.command("get")
+@click.argument("key")
+def config_get(key: str) -> None:
+    """Get a configuration value.
+
+    Examples:
+        chimera config get vision.provider
+        chimera config get sources.0.path
+    """
+    cfg = load_config()
+    value = get_nested_value(cfg, key)
+
+    if value is None:
+        print_error(f"Key not found: {key}")
+    else:
+        console.print(f"{key} = {value}")
+
+
+@config.command("test-api")
+@click.option("--provider", default="all", help="Provider to test (openai, anthropic, google, all)")
+def config_test_api(provider: str) -> None:
+    """Test API key configuration.
+
+    Example:
+        chimera config test-api
+        chimera config test-api --provider openai
+    """
+    results = test_api_keys(provider)
+
+    console.print(Panel.fit("[bold]API Key Status[/bold]", border_style="cyan"))
+
+    for name, configured in results.items():
+        if configured:
+            console.print(f"  [green]✓[/green] {name}")
+        else:
+            console.print(f"  [red]✗[/red] {name} [dim](not configured)[/dim]")
+
+
+@config.command("edit")
+def config_edit() -> None:
+    """Open config file in default editor."""
+    config_path = get_config_path()
+
+    if not config_path.exists():
+        # Create default config first
+        cfg = get_default_config()
+        save_config(cfg)
+        print_info(f"Created default config: {config_path}")
+
+    click.edit(filename=str(config_path))
 
 
 @main.command()

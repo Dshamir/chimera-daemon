@@ -65,6 +65,74 @@ class EntityRecord:
     position: int | None = None
 
 
+@dataclass
+class ImageMetadataRecord:
+    """Image metadata from EXIF/GPS/AI analysis."""
+    file_id: str
+    width: int | None = None
+    height: int | None = None
+    format: str | None = None
+    color_mode: str | None = None
+    # EXIF
+    camera_make: str | None = None
+    camera_model: str | None = None
+    lens: str | None = None
+    iso: int | None = None
+    aperture: str | None = None
+    shutter_speed: str | None = None
+    focal_length: str | None = None
+    date_taken: datetime | None = None
+    # GPS
+    latitude: float | None = None
+    longitude: float | None = None
+    altitude: float | None = None
+    location_name: str | None = None
+    # AI
+    ai_description: str | None = None
+    ai_categories: list[str] | None = None
+    ai_objects: list[str] | None = None
+    ai_provider: str | None = None
+    # Other
+    thumbnail_path: str | None = None
+    ocr_text: str | None = None
+
+
+@dataclass
+class AudioMetadataRecord:
+    """Audio metadata from file tags and transcription."""
+    file_id: str
+    duration_seconds: float | None = None
+    duration_formatted: str | None = None
+    bitrate: int | None = None
+    sample_rate: int | None = None
+    channels: int | None = None
+    codec: str | None = None
+    # Tags
+    title: str | None = None
+    artist: str | None = None
+    album: str | None = None
+    genre: str | None = None
+    year: int | None = None
+    track_number: int | None = None
+    # Transcription
+    transcription_status: str = "pending"
+    transcription_text: str | None = None
+    transcription_provider: str | None = None
+
+
+@dataclass
+class GPSLocationRecord:
+    """GPS location for cross-file correlation."""
+    id: str
+    file_id: str
+    latitude: float
+    longitude: float
+    location_name: str | None = None
+    country: str | None = None
+    city: str | None = None
+    captured_at: datetime | None = None
+
+
 class CatalogDB:
     """SQLite database for file and content catalog."""
     
@@ -76,13 +144,14 @@ class CatalogDB:
         """Initialize database schema."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn = sqlite3.connect(self.db_path, timeout=60.0)
         cursor = conn.cursor()
 
         # Enable WAL mode for better concurrent access
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA busy_timeout=60000")
+        cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache for large DBs
         
         # Sources table
         cursor.execute("""
@@ -271,7 +340,72 @@ class CatalogDB:
                 source          TEXT
             )
         """)
-        
+
+        # Image metadata table (multimedia)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS image_metadata (
+                file_id         TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                width           INTEGER,
+                height          INTEGER,
+                format          TEXT,
+                color_mode      TEXT,
+                camera_make     TEXT,
+                camera_model    TEXT,
+                lens            TEXT,
+                iso             INTEGER,
+                aperture        TEXT,
+                shutter_speed   TEXT,
+                focal_length    TEXT,
+                date_taken      DATETIME,
+                latitude        REAL,
+                longitude       REAL,
+                altitude        REAL,
+                location_name   TEXT,
+                ai_description  TEXT,
+                ai_categories   TEXT,
+                ai_objects      TEXT,
+                ai_provider     TEXT,
+                thumbnail_path  TEXT,
+                ocr_text        TEXT
+            )
+        """)
+
+        # Audio metadata table (multimedia)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audio_metadata (
+                file_id             TEXT PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
+                duration_seconds    REAL,
+                duration_formatted  TEXT,
+                bitrate             INTEGER,
+                sample_rate         INTEGER,
+                channels            INTEGER,
+                codec               TEXT,
+                title               TEXT,
+                artist              TEXT,
+                album               TEXT,
+                genre               TEXT,
+                year                INTEGER,
+                track_number        INTEGER,
+                transcription_status TEXT DEFAULT 'pending',
+                transcription_text  TEXT,
+                transcription_provider TEXT
+            )
+        """)
+
+        # GPS locations (for cross-file correlation)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS gps_locations (
+                id              TEXT PRIMARY KEY,
+                file_id         TEXT REFERENCES files(id) ON DELETE CASCADE,
+                latitude        REAL NOT NULL,
+                longitude       REAL NOT NULL,
+                location_name   TEXT,
+                country         TEXT,
+                city            TEXT,
+                captured_at     DATETIME
+            )
+        """)
+
         # Indexes
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_path ON files(path)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_files_status ON files(status)")
@@ -284,7 +418,16 @@ class CatalogDB:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_type ON discoveries(discovery_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_discoveries_confidence ON discoveries(confidence)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_conversations_provider ON conversations(provider)")
-        
+
+        # Multimedia indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_camera ON image_metadata(camera_make, camera_model)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_location ON image_metadata(latitude, longitude)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_image_date ON image_metadata(date_taken)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audio_artist ON audio_metadata(artist)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_audio_album ON audio_metadata(album)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gps_coords ON gps_locations(latitude, longitude)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_gps_location ON gps_locations(location_name)")
+
         conn.commit()
         conn.close()
         
@@ -292,12 +435,13 @@ class CatalogDB:
     
     def get_connection(self) -> sqlite3.Connection:
         """Get database connection with WAL mode for concurrency."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.row_factory = sqlite3.Row
         # Enable WAL mode for better concurrent access
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA cache_size=-64000")  # 64MB cache for large DBs
         return conn
     
     # ========== File Operations ==========
@@ -571,11 +715,197 @@ class CatalogDB:
         """Log an audit entry."""
         conn = self.get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             INSERT INTO audit_log (action, entity_type, entity_id, details, source)
             VALUES (?, ?, ?, ?, 'daemon')
         """, (action, entity_type, entity_id, details))
-        
+
         conn.commit()
         conn.close()
+
+    # ========== Multimedia Metadata Operations ==========
+
+    def add_image_metadata(self, record: ImageMetadataRecord) -> None:
+        """Add or update image metadata."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO image_metadata
+            (file_id, width, height, format, color_mode,
+             camera_make, camera_model, lens, iso, aperture,
+             shutter_speed, focal_length, date_taken,
+             latitude, longitude, altitude, location_name,
+             ai_description, ai_categories, ai_objects, ai_provider,
+             thumbnail_path, ocr_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.file_id, record.width, record.height, record.format, record.color_mode,
+            record.camera_make, record.camera_model, record.lens, record.iso, record.aperture,
+            record.shutter_speed, record.focal_length,
+            record.date_taken.isoformat() if record.date_taken else None,
+            record.latitude, record.longitude, record.altitude, record.location_name,
+            record.ai_description,
+            json.dumps(record.ai_categories) if record.ai_categories else None,
+            json.dumps(record.ai_objects) if record.ai_objects else None,
+            record.ai_provider,
+            record.thumbnail_path, record.ocr_text,
+        ))
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Added image metadata for file: {record.file_id}")
+
+    def get_image_metadata(self, file_id: str) -> ImageMetadataRecord | None:
+        """Get image metadata by file ID."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM image_metadata WHERE file_id = ?", (file_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return ImageMetadataRecord(
+                file_id=row["file_id"],
+                width=row["width"],
+                height=row["height"],
+                format=row["format"],
+                color_mode=row["color_mode"],
+                camera_make=row["camera_make"],
+                camera_model=row["camera_model"],
+                lens=row["lens"],
+                iso=row["iso"],
+                aperture=row["aperture"],
+                shutter_speed=row["shutter_speed"],
+                focal_length=row["focal_length"],
+                date_taken=datetime.fromisoformat(row["date_taken"]) if row["date_taken"] else None,
+                latitude=row["latitude"],
+                longitude=row["longitude"],
+                altitude=row["altitude"],
+                location_name=row["location_name"],
+                ai_description=row["ai_description"],
+                ai_categories=json.loads(row["ai_categories"]) if row["ai_categories"] else None,
+                ai_objects=json.loads(row["ai_objects"]) if row["ai_objects"] else None,
+                ai_provider=row["ai_provider"],
+                thumbnail_path=row["thumbnail_path"],
+                ocr_text=row["ocr_text"],
+            )
+        return None
+
+    def add_audio_metadata(self, record: AudioMetadataRecord) -> None:
+        """Add or update audio metadata."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO audio_metadata
+            (file_id, duration_seconds, duration_formatted, bitrate, sample_rate,
+             channels, codec, title, artist, album, genre, year, track_number,
+             transcription_status, transcription_text, transcription_provider)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.file_id, record.duration_seconds, record.duration_formatted,
+            record.bitrate, record.sample_rate, record.channels, record.codec,
+            record.title, record.artist, record.album, record.genre,
+            record.year, record.track_number,
+            record.transcription_status, record.transcription_text, record.transcription_provider,
+        ))
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Added audio metadata for file: {record.file_id}")
+
+    def get_audio_metadata(self, file_id: str) -> AudioMetadataRecord | None:
+        """Get audio metadata by file ID."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM audio_metadata WHERE file_id = ?", (file_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if row:
+            return AudioMetadataRecord(
+                file_id=row["file_id"],
+                duration_seconds=row["duration_seconds"],
+                duration_formatted=row["duration_formatted"],
+                bitrate=row["bitrate"],
+                sample_rate=row["sample_rate"],
+                channels=row["channels"],
+                codec=row["codec"],
+                title=row["title"],
+                artist=row["artist"],
+                album=row["album"],
+                genre=row["genre"],
+                year=row["year"],
+                track_number=row["track_number"],
+                transcription_status=row["transcription_status"] or "pending",
+                transcription_text=row["transcription_text"],
+                transcription_provider=row["transcription_provider"],
+            )
+        return None
+
+    def add_gps_location(self, record: GPSLocationRecord) -> None:
+        """Add a GPS location record."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO gps_locations
+            (id, file_id, latitude, longitude, location_name, country, city, captured_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            record.id, record.file_id, record.latitude, record.longitude,
+            record.location_name, record.country, record.city,
+            record.captured_at.isoformat() if record.captured_at else None,
+        ))
+
+        conn.commit()
+        conn.close()
+
+    def get_multimedia_stats(self) -> dict[str, Any]:
+        """Get multimedia statistics for telemetry."""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+
+        stats = {}
+
+        # Image stats
+        cursor.execute("SELECT COUNT(*) FROM image_metadata")
+        stats["images_indexed"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM image_metadata WHERE latitude IS NOT NULL")
+        stats["images_with_gps"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM image_metadata WHERE ai_description IS NOT NULL")
+        stats["images_with_ai"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM image_metadata WHERE ocr_text IS NOT NULL AND ocr_text != ''")
+        stats["images_with_ocr"] = cursor.fetchone()[0]
+
+        # Audio stats
+        cursor.execute("SELECT COUNT(*) FROM audio_metadata")
+        stats["audio_files"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM audio_metadata WHERE transcription_status = 'completed'")
+        stats["audio_transcribed"] = cursor.fetchone()[0]
+
+        # GPS stats
+        cursor.execute("SELECT COUNT(DISTINCT location_name) FROM gps_locations WHERE location_name IS NOT NULL")
+        stats["unique_locations"] = cursor.fetchone()[0]
+
+        # Camera stats
+        cursor.execute("""
+            SELECT camera_make || ' ' || camera_model AS camera, COUNT(*) as count
+            FROM image_metadata
+            WHERE camera_make IS NOT NULL
+            GROUP BY camera_make, camera_model
+            ORDER BY count DESC
+            LIMIT 5
+        """)
+        stats["top_cameras"] = [{"camera": row[0], "count": row[1]} for row in cursor.fetchall()]
+
+        conn.close()
+        return stats

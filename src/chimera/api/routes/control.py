@@ -150,22 +150,30 @@ async def run_correlation_now() -> dict:
         daemon = get_daemon()
         daemon.start_operation("correlation", {"source": "sync_api"})
 
+        success = False
+        error = None
         try:
             engine = get_correlation_engine()
             result = await engine.run_correlation()
 
             if result.success:
+                success = True
                 daemon.correlations_run += 1
                 daemon.discoveries_surfaced = result.discoveries_surfaced
                 daemon.patterns_detected = result.patterns_detected
                 daemon._last_correlation_time = result.total_time  # For ETA
+            else:
+                error = result.error
 
             return {
                 "status": "completed" if result.success else "failed",
                 "result": result.to_dict(),
             }
+        except Exception as e:
+            error = str(e)
+            raise
         finally:
-            daemon.end_operation()
+            daemon.end_operation(success=success, error=error)
     except RuntimeError:
         # Daemon not running, run without tracking
         try:
@@ -456,6 +464,30 @@ async def get_telemetry() -> dict:
         except Exception:
             top_discoveries = []
 
+        # Get multimedia stats
+        multimedia = {
+            "images_indexed": 0,
+            "images_with_gps": 0,
+            "images_with_ai": 0,
+            "audio_files": 0,
+            "audio_transcribed": 0,
+            "unique_locations": 0,
+        }
+        try:
+            from chimera.storage.catalog import CatalogDB
+            catalog = CatalogDB()
+            stats = catalog.get_multimedia_stats()
+            multimedia = {
+                "images_indexed": stats.get("images_total", 0),
+                "images_with_gps": stats.get("images_with_gps", 0),
+                "images_with_ai": stats.get("images_with_ai", 0),
+                "audio_files": stats.get("audio_total", 0),
+                "audio_transcribed": stats.get("audio_transcribed", 0),
+                "unique_locations": stats.get("unique_locations", 0),
+            }
+        except Exception:
+            pass
+
         return {
             "status": status,
             "system": system,
@@ -470,6 +502,7 @@ async def get_telemetry() -> dict:
             "patterns_detected": patterns_detected,
             "discoveries_by_type": discoveries_by_type,
             "top_discoveries": top_discoveries,
+            "multimedia": multimedia,
         }
 
     except RuntimeError:

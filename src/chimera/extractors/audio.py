@@ -12,6 +12,8 @@ from typing import Dict, Any, Optional, List
 from datetime import datetime
 from abc import ABC, abstractmethod
 
+from chimera.extractors.base import BaseExtractor, ExtractionResult
+
 logger = logging.getLogger(__name__)
 
 # Supported audio extensions
@@ -21,34 +23,87 @@ AUDIO_EXTENSIONS = {
 }
 
 
-class AudioExtractor:
+class AudioExtractor(BaseExtractor):
     """Extract audio metadata without transcription."""
-    
+
+    name = "audio"
+    extensions = ["mp3", "wav", "m4a", "flac", "ogg", "aac", "wma", "opus", "aiff"]
+    mime_types = ["audio/mpeg", "audio/wav", "audio/mp4", "audio/flac", "audio/ogg", "audio/aac"]
+
     SUPPORTED_EXTENSIONS = AUDIO_EXTENSIONS
-    
+
+    async def extract(self, file_path: Path) -> ExtractionResult:
+        """Extract audio metadata - returns ExtractionResult for pipeline compatibility."""
+        try:
+            file_hash = await self._compute_hash(file_path)
+            metadata = await self._extract_metadata(file_path)
+
+            # Build content from metadata (title, artist, album)
+            tags = metadata.get("tags", {})
+            content_parts = []
+            if tags.get("title"):
+                content_parts.append(f"Title: {tags['title']}")
+            if tags.get("artist"):
+                content_parts.append(f"Artist: {tags['artist']}")
+            if tags.get("album"):
+                content_parts.append(f"Album: {tags['album']}")
+
+            if content_parts:
+                content = "\n".join(content_parts)
+            else:
+                content = f"[Audio: {file_path.name}]"
+
+            return ExtractionResult(
+                file_path=file_path,
+                content=content,
+                metadata={
+                    "id": f"aud_{file_hash[:12]}",
+                    "file_hash": file_hash,
+                    "file_type": "audio",
+                    "duration_seconds": metadata.get("duration_seconds"),
+                    "duration_formatted": metadata.get("duration_formatted"),
+                    "bitrate": metadata.get("bitrate"),
+                    "sample_rate": metadata.get("sample_rate"),
+                    "channels": metadata.get("channels"),
+                    "tags": tags,
+                    "transcription": {
+                        "status": "pending",
+                        "text": None,
+                        "segments": None,
+                    },
+                    "needs_transcription": True,
+                    "extracted_at": datetime.now().isoformat(),
+                },
+                word_count=len(content.split()) if content_parts else 0,
+                success=True,
+            )
+        except Exception as e:
+            logger.error(f"Audio extraction failed for {file_path}: {e}")
+            return ExtractionResult(
+                file_path=file_path,
+                content="",
+                success=False,
+                error=str(e),
+            )
+
     async def extract_fast(self, file_path: Path) -> Dict[str, Any]:
-        """Fast extraction - metadata only, no transcription."""
-        
-        file_hash = await self._compute_hash(file_path)
-        metadata = await self._extract_metadata(file_path)
-        
-        return {
-            "id": f"aud_{file_hash[:12]}",
-            "file_path": str(file_path),
-            "file_name": file_path.name,
-            "file_type": "audio",
-            "extension": file_path.suffix.lower(),
-            "file_size": file_path.stat().st_size,
-            "file_hash": file_hash,
-            "metadata": metadata,
-            "transcription": {
-                "status": "pending",
-                "text": None,
-                "segments": None,
-            },
-            "needs_transcription": True,
-            "extracted_at": datetime.now().isoformat(),
-        }
+        """Fast extraction - metadata only, no transcription (legacy API)."""
+        result = await self.extract(file_path)
+        if result.success:
+            return {
+                "id": result.metadata.get("id"),
+                "file_path": str(file_path),
+                "file_name": file_path.name,
+                "file_type": "audio",
+                "extension": file_path.suffix.lower(),
+                "file_size": file_path.stat().st_size,
+                "file_hash": result.metadata.get("file_hash"),
+                "metadata": result.metadata,
+                "transcription": result.metadata.get("transcription"),
+                "needs_transcription": True,
+                "extracted_at": result.metadata.get("extracted_at"),
+            }
+        return {"error": result.error}
     
     async def _extract_metadata(self, file_path: Path) -> Dict[str, Any]:
         """Extract audio metadata using mutagen."""
@@ -267,14 +322,20 @@ class AudioTranscriber:
 
 
 # Convenience functions
+async def extract_audio(file_path: Path) -> ExtractionResult:
+    """Extract audio metadata and content."""
+    extractor = AudioExtractor()
+    return await extractor.extract(file_path)
+
+
 async def extract_audio_fast(file_path: Path) -> Dict[str, Any]:
-    """Fast audio extraction (metadata only)."""
+    """Fast audio extraction (metadata only) - legacy API."""
     extractor = AudioExtractor()
     return await extractor.extract_fast(file_path)
 
 
 async def transcribe_audio(
-    file_path: Path, 
+    file_path: Path,
     provider: str = "whisper",
     **kwargs
 ) -> Dict[str, Any]:

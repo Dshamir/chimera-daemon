@@ -63,6 +63,17 @@ class ChimeraDaemon:
         self._current_operation: dict | None = None
         self._operation_start_time: datetime | None = None
         self._last_correlation_time: float | None = None  # For ETA
+
+        # Completion indicator (show for 3 seconds after completion)
+        self._last_completed_operation: dict | None = None
+        self._completion_display_until: datetime | None = None
+
+        # Job timing history for ETA calculation (by job type)
+        self._job_timing_history: dict[str, list[float]] = {}
+
+        # Startup state tracking
+        self._startup_complete: bool = False
+        self._startup_result = None  # StartupResult from startup manager
     
     @property
     def uptime_seconds(self) -> float:
@@ -79,13 +90,60 @@ class ChimeraDaemon:
         }
         self._operation_start_time = datetime.now()
 
-    def end_operation(self) -> None:
-        """End current operation tracking."""
+    def end_operation(self, success: bool = True, error: str | None = None) -> None:
+        """End current operation tracking with completion status."""
+        from datetime import timedelta
+
+        if self._current_operation and self._operation_start_time:
+            total_time = (datetime.now() - self._operation_start_time).total_seconds()
+            operation_type = self._current_operation.get("type", "unknown")
+
+            # Store timing for future ETA calculations
+            if operation_type not in self._job_timing_history:
+                self._job_timing_history[operation_type] = []
+            self._job_timing_history[operation_type].append(total_time)
+            # Keep only last 10 timings per job type
+            if len(self._job_timing_history[operation_type]) > 10:
+                self._job_timing_history[operation_type] = self._job_timing_history[operation_type][-10:]
+
+            # Store completion for 3-second display
+            self._last_completed_operation = {
+                **self._current_operation,
+                "status": "completed" if success else "failed",
+                "error": error,
+                "total_time": total_time,
+                "completed_at": datetime.now().isoformat(),
+            }
+            self._completion_display_until = datetime.now() + timedelta(seconds=3)
+
         self._current_operation = None
         self._operation_start_time = None
 
+    def _estimate_eta(self, operation_type: str, elapsed: float) -> float | None:
+        """Estimate remaining time based on historical average."""
+        # For correlation, use last correlation time if available
+        if operation_type == "correlation" and self._last_correlation_time:
+            return max(0, self._last_correlation_time - elapsed)
+
+        # For other operations, use historical average
+        history = self._job_timing_history.get(operation_type, [])
+        if not history:
+            return None
+
+        avg_time = sum(history) / len(history)
+        return max(0, avg_time - elapsed)
+
     def get_current_operation(self) -> dict | None:
-        """Get current operation with elapsed time and ETA."""
+        """Get current operation with elapsed time, ETA, or recent completion."""
+        # Show completion indicator for 3 seconds after operation ends
+        if self._last_completed_operation and self._completion_display_until:
+            if datetime.now() < self._completion_display_until:
+                return self._last_completed_operation
+            else:
+                # Clear completed operation after display period
+                self._last_completed_operation = None
+                self._completion_display_until = None
+
         if not self._current_operation:
             return None
 
@@ -93,14 +151,12 @@ class ChimeraDaemon:
         eta = None
         if self._operation_start_time:
             elapsed = (datetime.now() - self._operation_start_time).total_seconds()
-
-            # Calculate ETA for correlation based on historical data
-            if self._current_operation.get("type") == "correlation" and self._last_correlation_time:
-                remaining = max(0, self._last_correlation_time - elapsed)
-                eta = remaining
+            operation_type = self._current_operation.get("type", "unknown")
+            eta = self._estimate_eta(operation_type, elapsed)
 
         return {
             **self._current_operation,
+            "status": "running",
             "elapsed_seconds": elapsed,
             "eta_seconds": eta,
         }
@@ -129,6 +185,19 @@ class ChimeraDaemon:
         config_dir = ensure_config_dir()
         logger.info(f"Config directory: {config_dir}")
 
+        # Phase 1: Run pre-flight checks
+        from chimera.startup import StartupManager
+
+        startup_mgr = StartupManager(config_dir)
+        self._startup_result = startup_mgr.run_startup_sequence(
+            on_progress=self._log_startup_progress
+        )
+
+        if not self._startup_result.success:
+            logger.error("Startup checks failed - aborting")
+            raise RuntimeError(f"Startup failed: {self._startup_result.errors}")
+
+        # Phase 2: Initialize components
         self.queue = JobQueue()
         await self.queue.load_pending_jobs()
         pending = await self.queue.get_pending_count()
@@ -145,8 +214,15 @@ class ChimeraDaemon:
         
         self._worker_task = asyncio.create_task(self._job_worker())
         logger.info("Job worker started.")
-        
-        logger.info("CHIMERA daemon started successfully.")
+
+        # Phase 3: Mark startup complete
+        self._startup_complete = True
+        logger.info("CHIMERA daemon started successfully - ALL SYSTEMS READY")
+
+    def _log_startup_progress(self, check_name: str, status: str) -> None:
+        """Log startup check progress."""
+        icons = {"checking": "...", "passed": "[OK]", "failed": "[FAIL]", "skipped": "[SKIP]"}
+        logger.debug(f"  {icons.get(status, '?')} {check_name}")
     
     async def stop(self) -> None:
         logger.info("Stopping CHIMERA daemon...")
@@ -276,11 +352,14 @@ class ChimeraDaemon:
         logger.info("Running correlation analysis...")
         self.start_operation("correlation", {"source": "queued_job", "job_id": job.id})
 
+        success = False
+        error = None
         try:
             engine = self._get_correlation_engine()
             result = await engine.run_correlation()
 
             if result.success:
+                success = True
                 self.correlations_run += 1
                 self.discoveries_surfaced = result.discoveries_surfaced
                 self.patterns_detected = result.patterns_detected
@@ -290,9 +369,13 @@ class ChimeraDaemon:
                     f"{result.discoveries_surfaced} discoveries"
                 )
             else:
+                error = result.error
                 logger.error(f"Correlation failed: {result.error}")
+        except Exception as e:
+            error = str(e)
+            logger.error(f"Correlation failed: {e}")
         finally:
-            self.end_operation()
+            self.end_operation(success=success, error=error)
     
     async def _process_discovery(self, job: Job) -> None:
         logger.info("Surfacing discoveries...")

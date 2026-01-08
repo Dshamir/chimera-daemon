@@ -4,6 +4,7 @@ Extracts:
 - EXIF metadata (camera, settings, timestamps)
 - GPS coordinates with reverse geocoding
 - Thumbnails (WebP, multiple sizes)
+- OCR text content
 - File hash for deduplication
 """
 
@@ -14,66 +15,103 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
+from chimera.extractors.base import BaseExtractor, ExtractionResult
+
 logger = logging.getLogger(__name__)
 
 # Supported image extensions
 IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", 
+    ".jpg", ".jpeg", ".png", ".gif", ".webp",
     ".bmp", ".tiff", ".tif", ".heic", ".heif"
 }
 
 
-class ImageExtractor:
+class ImageExtractor(BaseExtractor):
     """Extract metadata from images with parallel processing."""
-    
-    SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS
-    
-    def __init__(self, generate_thumbnails: bool = True, geocode: bool = True):
+
+    name = "image"
+    extensions = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "heic", "heif"]
+    mime_types = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff"]
+
+    def __init__(self, generate_thumbnails: bool = True, geocode: bool = True, enable_ocr: bool = True):
         self.generate_thumbnails = generate_thumbnails
         self.geocode = geocode
+        self.enable_ocr = enable_ocr
         self._geocoder = None
-    
-    async def extract(self, file_path: Path) -> Dict[str, Any]:
+
+    async def extract(self, file_path: Path) -> ExtractionResult:
         """Extract all image data in parallel."""
-        
-        # Run all extractions concurrently
-        tasks = [
-            asyncio.create_task(self._extract_exif(file_path)),
-            asyncio.create_task(self._compute_hash(file_path)),
-            asyncio.create_task(self._get_dimensions(file_path)),
-        ]
-        
-        if self.generate_thumbnails:
-            tasks.append(asyncio.create_task(self._generate_thumbnail(file_path)))
-        
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Unpack results
-        exif_data = results[0] if not isinstance(results[0], Exception) else {}
-        file_hash = results[1] if not isinstance(results[1], Exception) else hashlib.md5(str(file_path).encode()).hexdigest()
-        dimensions = results[2] if not isinstance(results[2], Exception) else None
-        thumbnail_path = results[3] if len(results) > 3 and not isinstance(results[3], Exception) else None
-        
-        # Extract GPS and geocode if available
-        gps_data = None
-        if exif_data.get("gps_raw"):
-            gps_data = await self._process_gps(exif_data.pop("gps_raw"))
-        
-        return {
-            "id": f"img_{file_hash[:12]}",
-            "file_path": str(file_path),
-            "file_name": file_path.name,
-            "file_type": "image",
-            "extension": file_path.suffix.lower(),
-            "file_size": file_path.stat().st_size,
-            "file_hash": file_hash,
-            "dimensions": dimensions,
-            "exif": exif_data,
-            "gps": gps_data,
-            "thumbnail": thumbnail_path,
-            "needs_ai_analysis": True,
-            "extracted_at": datetime.now().isoformat(),
-        }
+
+        try:
+            # Run all extractions concurrently
+            tasks = [
+                asyncio.create_task(self._extract_exif(file_path)),
+                asyncio.create_task(self._compute_hash(file_path)),
+                asyncio.create_task(self._get_dimensions(file_path)),
+            ]
+
+            if self.generate_thumbnails:
+                tasks.append(asyncio.create_task(self._generate_thumbnail(file_path)))
+
+            if self.enable_ocr:
+                tasks.append(asyncio.create_task(self._extract_ocr(file_path)))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Unpack results
+            exif_data = results[0] if not isinstance(results[0], Exception) else {}
+            file_hash = results[1] if not isinstance(results[1], Exception) else hashlib.md5(str(file_path).encode()).hexdigest()
+            dimensions = results[2] if not isinstance(results[2], Exception) else None
+
+            # Optional results based on settings
+            idx = 3
+            thumbnail_path = None
+            ocr_text = None
+
+            if self.generate_thumbnails:
+                thumbnail_path = results[idx] if not isinstance(results[idx], Exception) else None
+                idx += 1
+
+            if self.enable_ocr:
+                ocr_text = results[idx] if not isinstance(results[idx], Exception) else None
+
+            # Extract GPS and geocode if available
+            gps_data = None
+            if exif_data.get("gps_raw"):
+                gps_data = await self._process_gps(exif_data.pop("gps_raw"))
+
+            # Build content from OCR text or descriptive placeholder
+            if ocr_text:
+                content = ocr_text
+            else:
+                content = f"[Image: {file_path.name}]"
+
+            # Return ExtractionResult for pipeline compatibility
+            return ExtractionResult(
+                file_path=file_path,
+                content=content,
+                metadata={
+                    "id": f"img_{file_hash[:12]}",
+                    "file_hash": file_hash,
+                    "file_type": "image",
+                    "dimensions": dimensions,
+                    "exif": exif_data,
+                    "gps": gps_data,
+                    "thumbnail": thumbnail_path,
+                    "needs_ai_analysis": True,
+                    "extracted_at": datetime.now().isoformat(),
+                },
+                word_count=len(content.split()) if ocr_text else 0,
+                success=True,
+            )
+        except Exception as e:
+            logger.error(f"Image extraction failed for {file_path}: {e}")
+            return ExtractionResult(
+                file_path=file_path,
+                content="",
+                success=False,
+                error=str(e),
+            )
     
     async def _extract_exif(self, file_path: Path) -> Dict[str, Any]:
         """Extract EXIF metadata."""
@@ -339,14 +377,45 @@ class ImageExtractor:
     async def _compute_hash(self, file_path: Path) -> str:
         """Compute file hash for deduplication."""
         hasher = hashlib.md5()
-        
+
         with open(file_path, "rb") as f:
             # Read in chunks for large files
             for chunk in iter(lambda: f.read(65536), b""):
                 hasher.update(chunk)
-        
+
         return hasher.hexdigest()
-    
+
+    async def _extract_ocr(self, file_path: Path) -> Optional[str]:
+        """Extract text from image using OCR."""
+        try:
+            from PIL import Image
+            import pytesseract
+
+            # Run OCR in executor to not block
+            loop = asyncio.get_event_loop()
+
+            def do_ocr():
+                with Image.open(file_path) as img:
+                    # Convert to RGB if needed
+                    if img.mode in ("RGBA", "P"):
+                        img = img.convert("RGB")
+                    return pytesseract.image_to_string(img).strip()
+
+            text = await loop.run_in_executor(None, do_ocr)
+
+            # Return None if no meaningful text found
+            if not text or len(text) < 3:
+                return None
+
+            return text
+
+        except ImportError:
+            logger.debug("pytesseract not available for OCR")
+            return None
+        except Exception as e:
+            logger.debug(f"OCR extraction failed for {file_path}: {e}")
+            return None
+
     async def _get_dimensions(self, file_path: Path) -> Optional[Dict[str, int]]:
         """Get image dimensions."""
         try:
@@ -362,7 +431,7 @@ class ImageExtractor:
 
 
 # Convenience function
-async def extract_image(file_path: Path, **kwargs) -> Dict[str, Any]:
-    """Extract image metadata."""
+async def extract_image(file_path: Path, **kwargs) -> ExtractionResult:
+    """Extract image metadata and content."""
     extractor = ImageExtractor(**kwargs)
     return await extractor.extract(file_path)

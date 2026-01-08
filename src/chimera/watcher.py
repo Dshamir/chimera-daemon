@@ -57,17 +57,46 @@ class ChimeraEventHandler(FileSystemEventHandler):
         """Get file extension without dot."""
         return Path(path).suffix.lstrip(".").lower()
     
+    def _is_within_depth(self, path: str) -> bool:
+        """Check if path is within allowed depth from source root.
+
+        Args:
+            path: Full path to the file
+
+        Returns:
+            True if within allowed depth, or if max_depth is None (unlimited)
+        """
+        if self.source.max_depth is None:
+            return True  # Unlimited depth
+
+        try:
+            source_path = Path(self.source.path).resolve()
+            file_path = Path(path).resolve()
+
+            # Get relative path from source
+            relative = file_path.relative_to(source_path)
+            depth = len(relative.parts) - 1  # Subtract 1 because file itself is not a level
+
+            return depth <= self.source.max_depth
+        except ValueError:
+            # Path is not under source_path
+            return False
+
     def _should_process(self, path: str) -> bool:
         """Check if file should be processed."""
         if self._should_ignore(path):
             return False
-        
+
+        # Check depth limit
+        if not self._is_within_depth(path):
+            return False
+
         # Check file type filter if specified
         if self.source.file_types:
             ext = self._get_extension(path)
             if ext not in [ft.lower() for ft in self.source.file_types]:
                 return False
-        
+
         return True
     
     def _is_debounced(self, path: str) -> bool:

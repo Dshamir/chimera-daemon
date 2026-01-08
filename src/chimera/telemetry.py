@@ -93,6 +93,9 @@ class TelemetryState:
     vectors_size_gb: float = 0
     catalog_size_mb: float = 0
 
+    # Multimedia
+    multimedia: dict = field(default_factory=dict)
+
 
 def api_request(endpoint: str, timeout: float = 5.0) -> dict | None:
     """Make API request to daemon."""
@@ -234,6 +237,9 @@ class TelemetryDashboard:
         self.state.catalog_size_mb = storage.get("catalog_mb", 0)
         self.state.vectors_size_gb = storage.get("vectors_gb", 0)
 
+        # Multimedia
+        self.state.multimedia = telemetry.get("multimedia", {})
+
         # Current job (with ETA)
         current_job = telemetry.get("current_job")
         self.state.current_job = current_job
@@ -365,31 +371,55 @@ class TelemetryDashboard:
             job_type = job.get("type", "unknown")
             elapsed = job.get("elapsed_seconds")
             eta = job.get("eta_seconds")
+            status = job.get("status", "running")
             payload = job.get("payload", {}) or job.get("details", {})
 
             # Format job type nicely
             type_display = job_type.replace("_", " ").title()
 
-            # Show spinner-like indicator
-            spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-            spinner_idx = int(time.time() * 4) % len(spinner_chars)
-            spinner = spinner_chars[spinner_idx]
+            # Check if job just completed (show for 3 seconds)
+            if status == "completed":
+                total_time = job.get("total_time", elapsed)
+                content.append("✓ ", style="green bold")
+                content.append(f"{type_display}\n", style="bold")
+                content.append("  Status: ", style="dim")
+                content.append("Completed", style="green bold")
+                content.append(f" in {format_elapsed(total_time)}\n", style="dim")
 
-            content.append(f"{spinner} ", style="cyan bold")
-            content.append(f"{type_display}\n", style="bold")
-            content.append(f"  Elapsed: {format_elapsed(elapsed)}", style="dim")
+                # Show full progress bar
+                bar = create_bar(100, 100, width=30)
+                content.append(f"  {bar} 100%\n", style="green")
 
-            # Show ETA if available
-            if eta is not None and eta > 0:
-                content.append(f" | ETA: {format_elapsed(eta)}\n", style="yellow")
+            elif status == "failed":
+                content.append("✗ ", style="red bold")
+                content.append(f"{type_display}\n", style="bold")
+                content.append("  Status: ", style="dim")
+                content.append("Failed\n", style="red bold")
+                error = job.get("error", "Unknown error")
+                if error:
+                    content.append(f"  {error[:40]}\n", style="red dim")
+
             else:
-                content.append("\n")
+                # Running - show spinner
+                spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+                spinner_idx = int(time.time() * 4) % len(spinner_chars)
+                spinner = spinner_chars[spinner_idx]
 
-            # Show progress bar if we have ETA
-            if eta is not None and elapsed is not None and (elapsed + eta) > 0:
-                progress = elapsed / (elapsed + eta)
-                bar = create_bar(progress * 100, 100, width=30)
-                content.append(f"  {bar} {progress:.0%}\n", style="cyan")
+                content.append(f"{spinner} ", style="cyan bold")
+                content.append(f"{type_display}\n", style="bold")
+                content.append(f"  Elapsed: {format_elapsed(elapsed)}", style="dim")
+
+                # Show ETA if available
+                if eta is not None and eta > 0:
+                    content.append(f" | ETA: {format_elapsed(eta)}\n", style="yellow")
+                else:
+                    content.append("\n")
+
+                # Show progress bar if we have ETA
+                if eta is not None and elapsed is not None and (elapsed + eta) > 0:
+                    progress = elapsed / (elapsed + eta)
+                    bar = create_bar(progress * 100, 100, width=30)
+                    content.append(f"  {bar} {progress:.0%}\n", style="cyan")
 
             # Show source (sync_api vs queued_job)
             source = payload.get("source", "")
@@ -594,6 +624,26 @@ class TelemetryDashboard:
 
         return Panel(content, title="[bold]storage[/bold]", border_style="dim")
 
+    def make_multimedia_panel(self) -> Panel:
+        """Create multimedia extraction stats panel."""
+        mm = self.state.multimedia or {}
+
+        content = Text()
+        content.append("Images\n", style="bold cyan")
+        content.append(f"  Indexed: {mm.get('images_indexed', 0):,}\n")
+        content.append(f"  With GPS: {mm.get('images_with_gps', 0):,}\n")
+        content.append(f"  AI Analyzed: {mm.get('images_with_ai', 0):,}\n")
+
+        content.append("\nAudio\n", style="bold cyan")
+        content.append(f"  Files: {mm.get('audio_files', 0):,}\n")
+        content.append(f"  Transcribed: {mm.get('audio_transcribed', 0):,}\n")
+
+        if mm.get('unique_locations', 0) > 0:
+            content.append(f"\nLocations: ", style="dim")
+            content.append(f"{mm.get('unique_locations', 0):,}", style="green")
+
+        return Panel(content, title="[bold]multimedia[/bold]", border_style="blue")
+
     def make_layout(self) -> Layout:
         """Create the dashboard layout."""
         layout = Layout()
@@ -631,6 +681,7 @@ class TelemetryDashboard:
         layout["middle"].split_row(
             Layout(name="feed", ratio=1),
             Layout(name="discoveries", ratio=1),
+            Layout(name="multimedia", ratio=1),
         )
 
         # Bottom row - current operation + queue
@@ -652,6 +703,7 @@ class TelemetryDashboard:
         layout["entities"].update(self.make_entities_panel())
         layout["feed"].update(self.make_feed_panel())
         layout["discoveries"].update(self.make_discoveries_panel())
+        layout["multimedia"].update(self.make_multimedia_panel())
         layout["current_op"].update(self.make_current_op_panel())
         layout["job_queue"].update(self.make_job_queue_panel())
         layout["storage"].update(self.make_storage_panel())
@@ -674,7 +726,9 @@ class TelemetryDashboard:
         """Run the dashboard (blocking)."""
         self.running = True
 
-        with Live(self.make_layout(), refresh_per_second=2, screen=True) as live:
+        # Match refresh_per_second to refresh_rate to prevent flickering
+        refresh_fps = int(1.0 / self.refresh_rate) if self.refresh_rate > 0 else 1
+        with Live(self.make_layout(), refresh_per_second=refresh_fps, screen=True) as live:
             try:
                 while self.running:
                     self.fetch_status()

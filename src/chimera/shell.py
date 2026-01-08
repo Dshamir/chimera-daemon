@@ -49,6 +49,15 @@ from chimera.config import load_config, save_config, ensure_config_dir, DEFAULT_
 
 console = Console()
 
+# Timeout constants (in seconds) - INCREASED for large databases
+HEALTH_TIMEOUT = 10      # was 2 - quick health check
+READINESS_TIMEOUT = 5    # timeout for single readiness check
+STARTUP_WAIT = 60        # was 3 - wait for full startup
+QUERY_TIMEOUT = 60       # was 10 - for database queries
+CORRELATION_TIMEOUT = 600  # was 60 - correlation can take 10+ minutes with millions of entities
+EXCAVATE_TIMEOUT = 30    # for queuing excavation
+FAE_TIMEOUT = 30         # for queuing FAE processing
+
 # Session logging
 SESSION_LOG_DIR = DEFAULT_CONFIG_DIR / "sessions"
 SESSION_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -134,16 +143,64 @@ class DaemonManager:
         """Check if daemon is healthy."""
         try:
             import httpx
-            r = httpx.get("http://127.0.0.1:7777/api/v1/health", timeout=2)
-            return r.status_code == 200
+            r = httpx.get("http://127.0.0.1:7777/api/v1/health", timeout=HEALTH_TIMEOUT)
+            data = r.json()
+            # Check both status code and actual health status
+            return r.status_code == 200 and data.get("status") == "healthy"
         except:
             return False
-    
+
+    def wait_for_ready(self, timeout: float = STARTUP_WAIT) -> bool:
+        """Wait for daemon to be fully ready (all startup checks passed).
+
+        This polls the /readiness endpoint until all systems report ready,
+        or until timeout expires.
+
+        Args:
+            timeout: Maximum seconds to wait for readiness
+
+        Returns:
+            True if system became ready, False if timeout
+        """
+        import httpx
+
+        start = time.time()
+        last_status = None
+
+        while time.time() - start < timeout:
+            try:
+                r = httpx.get(
+                    "http://127.0.0.1:7777/api/v1/readiness",
+                    timeout=READINESS_TIMEOUT
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("ready"):
+                        return True
+
+                    # Log progress for debugging
+                    checks = data.get("checks", {})
+                    status = f"Waiting: {sum(checks.values())}/{len(checks)} checks passed"
+                    if status != last_status:
+                        console.print(f"[dim]{status}[/dim]")
+                        last_status = status
+
+            except httpx.TimeoutException:
+                pass  # Server might be busy, keep waiting
+            except httpx.ConnectError:
+                pass  # Server not up yet, keep waiting
+            except Exception as e:
+                console.print(f"[dim]Readiness check error: {e}[/dim]")
+
+            time.sleep(1)
+
+        return False
+
     def get_status(self) -> dict:
         """Get daemon status."""
         try:
             import httpx
-            r = httpx.get("http://127.0.0.1:7777/api/v1/status", timeout=5)
+            r = httpx.get("http://127.0.0.1:7777/api/v1/status", timeout=QUERY_TIMEOUT)
             return r.json()
         except:
             return {}
@@ -319,23 +376,90 @@ class ChimeraShell:
                 break
         
         # Cleanup
+        self._cleanup_temp_files()
         self.daemon.stop()
         console.print("\n[cyan]CHIMERA session ended. Goodbye![/cyan]")
     
     def _start_api_server(self):
-        """Start API server in background thread."""
+        """Start API server with subprocess monitoring and error capture."""
         import subprocess
-        self._server_process = subprocess.Popen(
-            [sys.executable, "-m", "chimera.cli", "serve", "--dev"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        import tempfile
+
+        console.print("[dim]Starting API server...[/dim]")
+
+        # Create temp files to capture output (more reliable than PIPE on Windows)
+        self._stdout_file = tempfile.NamedTemporaryFile(
+            mode='w+', delete=False, suffix='_chimera_stdout.log'
         )
-        time.sleep(3)
+        self._stderr_file = tempfile.NamedTemporaryFile(
+            mode='w+', delete=False, suffix='_chimera_stderr.log'
+        )
+
+        # Get project root for cwd - ensures module imports work
+        project_root = Path(__file__).parent.parent.parent.parent
+
+        try:
+            self._server_process = subprocess.Popen(
+                [sys.executable, "-m", "chimera.cli", "serve", "--dev"],
+                stdout=self._stdout_file,
+                stderr=self._stderr_file,
+                cwd=str(project_root),
+                env=os.environ.copy(),
+            )
+        except Exception as e:
+            console.print(f"[red]Failed to start subprocess: {e}[/red]")
+            return
+
+        console.print("[dim]Running startup checks (this may take up to 60 seconds)...[/dim]")
+
+        # Wait for readiness with subprocess monitoring
+        start_time = time.time()
+        with console.status("[yellow]Initializing CHIMERA...[/yellow]"):
+            while time.time() - start_time < STARTUP_WAIT:
+                # Check if subprocess crashed
+                return_code = self._server_process.poll()
+                if return_code is not None:
+                    # Process exited - read error output
+                    self._stderr_file.flush()
+                    self._stderr_file.seek(0)
+                    error_output = self._stderr_file.read()
+
+                    console.print(f"[red]Daemon process exited with code {return_code}[/red]")
+                    if error_output:
+                        console.print("[red]Error output:[/red]")
+                        # Show last 20 lines of error
+                        for line in error_output.strip().split('\n')[-20:]:
+                            if line.strip():
+                                console.print(f"  [dim]{line}[/dim]")
+                    else:
+                        console.print("[dim]No error output captured[/dim]")
+                    return
+
+                # Check if daemon is ready
+                if self.daemon.wait_for_ready(timeout=2):
+                    console.print("[green]All systems ready[/green]")
+                    self.daemon.running = True
+                    return
+
+                time.sleep(1)
+
+        # Timeout reached - check final state
         if self.daemon.health_check():
-            console.print("[green]✓ Daemon started[/green]")
+            console.print("[yellow]Daemon running (some checks may be pending)[/yellow]")
             self.daemon.running = True
         else:
-            console.print("[yellow]⚠ Daemon may not be fully ready[/yellow]")
+            # Read any error output
+            self._stderr_file.flush()
+            self._stderr_file.seek(0)
+            error_output = self._stderr_file.read()
+
+            console.print("[red]Daemon failed to start within timeout[/red]")
+            if error_output:
+                console.print("[red]Last errors:[/red]")
+                for line in error_output.strip().split('\n')[-10:]:
+                    if line.strip():
+                        console.print(f"  [dim]{line}[/dim]")
+            console.print("[dim]Try running 'chimera serve --dev' directly for full output[/dim]")
     
     # ============ COMMANDS ============
     
@@ -394,10 +518,30 @@ class ChimeraShell:
     
     async def cmd_stop(self, args: str):
         """Stop daemon."""
-        if hasattr(self, '_server_process'):
+        if hasattr(self, '_server_process') and self._server_process:
             self._server_process.terminate()
+            try:
+                self._server_process.wait(timeout=5)
+            except Exception:
+                pass
             console.print("[yellow]Daemon stopped[/yellow]")
+
+        # Cleanup temp files
+        self._cleanup_temp_files()
         self.daemon.stop()
+
+    def _cleanup_temp_files(self):
+        """Clean up temporary log files created during startup."""
+        for attr in ('_stdout_file', '_stderr_file'):
+            if hasattr(self, attr):
+                f = getattr(self, attr)
+                if f:
+                    try:
+                        f.close()
+                        os.unlink(f.name)
+                    except Exception:
+                        pass
+                    setattr(self, attr, None)
     
     async def cmd_status(self, args: str):
         """Show status."""
@@ -516,18 +660,19 @@ class ChimeraShell:
     async def cmd_excavate(self, args: str):
         """Run full excavation."""
         console.print("[yellow]⛏️ Starting excavation...[/yellow]")
-        
+
         try:
             import httpx
             r = httpx.post("http://127.0.0.1:7777/api/v1/excavate", json={
                 "files": True,
                 "fae": True,
                 "correlate": True,
-            }, timeout=10)
+            }, timeout=EXCAVATE_TIMEOUT)
             result = r.json()
-            
+
             if result.get("status") == "queued":
                 console.print(f"[green]✓ Excavation queued: {result.get('job_id')}[/green]")
+                console.print("[dim]Use /status to monitor progress[/dim]")
             else:
                 console.print(f"[red]Error: {result.get('error')}[/red]")
         except Exception as e:
@@ -545,7 +690,7 @@ class ChimeraShell:
                 "path": path or "default",
                 "provider": "auto",
                 "correlate": True,
-            }, timeout=10)
+            }, timeout=FAE_TIMEOUT)
             result = r.json()
             
             if result.get("status") == "queued":
@@ -557,11 +702,11 @@ class ChimeraShell:
     
     async def cmd_correlate(self, args: str):
         """Run correlation."""
-        console.print("[yellow]🔗 Running correlation...[/yellow]")
-        
+        console.print("[yellow]🔗 Running correlation (this may take several minutes)...[/yellow]")
+
         try:
             import httpx
-            r = httpx.post("http://127.0.0.1:7777/api/v1/correlate/run", timeout=60)
+            r = httpx.post("http://127.0.0.1:7777/api/v1/correlate/run", timeout=CORRELATION_TIMEOUT)
             result = r.json()
             
             if result.get("status") == "completed":
@@ -580,7 +725,7 @@ class ChimeraShell:
         """Show discoveries."""
         try:
             import httpx
-            r = httpx.get("http://127.0.0.1:7777/api/v1/discoveries?min_confidence=0.1", timeout=10)
+            r = httpx.get("http://127.0.0.1:7777/api/v1/discoveries?min_confidence=0.1", timeout=QUERY_TIMEOUT)
             result = r.json()
             
             discoveries = result.get("discoveries", [])
@@ -600,7 +745,7 @@ class ChimeraShell:
         """List entities."""
         try:
             import httpx
-            r = httpx.get("http://127.0.0.1:7777/api/v1/entities?limit=30", timeout=10)
+            r = httpx.get("http://127.0.0.1:7777/api/v1/entities?limit=30", timeout=QUERY_TIMEOUT)
             result = r.json()
             
             entities = result.get("entities", [])
@@ -627,7 +772,7 @@ class ChimeraShell:
         """Show patterns."""
         try:
             import httpx
-            r = httpx.get("http://127.0.0.1:7777/api/v1/patterns?min_confidence=0.1", timeout=10)
+            r = httpx.get("http://127.0.0.1:7777/api/v1/patterns?min_confidence=0.1", timeout=QUERY_TIMEOUT)
             result = r.json()
             
             patterns = result.get("patterns", [])

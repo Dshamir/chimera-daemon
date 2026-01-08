@@ -37,7 +37,8 @@ class ExtractorRegistry:
             JSONExtractor,
         )
         from chimera.extractors.image import ImageExtractor
-        
+        from chimera.extractors.audio import AudioExtractor
+
         extractors = [
             PDFExtractor(),
             DOCXExtractor(),
@@ -49,6 +50,7 @@ class ExtractorRegistry:
             YAMLExtractor(),
             JSONExtractor(),
             ImageExtractor(),
+            AudioExtractor(),
         ]
         
         for extractor in extractors:

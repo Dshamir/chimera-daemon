@@ -46,7 +46,7 @@ class JobPriority(Enum):
     P5_BACKGROUND = 5 # Background tasks
 
 
-@dataclass
+@dataclass(order=False)
 class Job:
     """A queued extraction job."""
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -61,6 +61,16 @@ class Job:
     retry_count: int = 0
     max_retries: int = 3
 
+    def __lt__(self, other: "Job") -> bool:
+        """Compare jobs for priority queue ordering."""
+        if not isinstance(other, Job):
+            return NotImplemented
+        # Lower priority value = higher priority
+        if self.priority.value != other.priority.value:
+            return self.priority.value < other.priority.value
+        # Same priority: earlier created_at first
+        return self.created_at < other.created_at
+
 
 class JobQueue:
     """Persistent job queue backed by SQLite."""
@@ -74,10 +84,10 @@ class JobQueue:
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with WAL mode for concurrency."""
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        conn = sqlite3.connect(self.db_path, timeout=60.0)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA busy_timeout=60000")
         return conn
 
     def _init_db(self) -> None:
