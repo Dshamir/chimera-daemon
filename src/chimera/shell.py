@@ -156,6 +156,8 @@ class DaemonManager:
         This polls the /readiness endpoint until all systems report ready,
         or until timeout expires.
 
+        Uses a single httpx.Client instance to prevent Windows socket pool exhaustion.
+
         Args:
             timeout: Maximum seconds to wait for readiness
 
@@ -167,32 +169,35 @@ class DaemonManager:
         start = time.time()
         last_status = None
 
-        while time.time() - start < timeout:
-            try:
-                r = httpx.get(
-                    "http://127.0.0.1:7777/api/v1/readiness",
-                    timeout=READINESS_TIMEOUT
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    if data.get("ready"):
-                        return True
+        # Use a single client instance to prevent socket pool exhaustion on Windows
+        # This is more efficient than creating a new connection for each poll
+        with httpx.Client(timeout=READINESS_TIMEOUT) as client:
+            while time.time() - start < timeout:
+                try:
+                    r = client.get("http://127.0.0.1:7777/api/v1/readiness")
+                    if r.status_code == 200:
+                        data = r.json()
+                        if data.get("ready"):
+                            return True
 
-                    # Log progress for debugging
-                    checks = data.get("checks", {})
-                    status = f"Waiting: {sum(checks.values())}/{len(checks)} checks passed"
-                    if status != last_status:
-                        console.print(f"[dim]{status}[/dim]")
-                        last_status = status
+                        # Log progress for debugging
+                        checks = data.get("checks", {})
+                        status = f"Waiting: {sum(checks.values())}/{len(checks)} checks passed"
+                        if status != last_status:
+                            console.print(f"[dim]{status}[/dim]")
+                            last_status = status
 
-            except httpx.TimeoutException:
-                pass  # Server might be busy, keep waiting
-            except httpx.ConnectError:
-                pass  # Server not up yet, keep waiting
-            except Exception as e:
-                console.print(f"[dim]Readiness check error: {e}[/dim]")
+                except httpx.TimeoutException:
+                    pass  # Server might be busy, keep waiting
+                except httpx.ConnectError:
+                    pass  # Server not up yet, keep waiting
+                except Exception as e:
+                    # Only log unexpected errors (not connection issues)
+                    if "10054" not in str(e) and "ConnectionReset" not in str(e):
+                        console.print(f"[dim]Readiness check: {type(e).__name__}[/dim]")
 
-            time.sleep(1)
+                # Increased poll interval to reduce connection spam
+                time.sleep(2)
 
         return False
 
@@ -412,11 +417,15 @@ class ChimeraShell:
 
         console.print("[dim]Running startup checks (this may take up to 60 seconds)...[/dim]")
 
+        # CRITICAL: Wait a few seconds before polling to let the daemon initialize
+        # This prevents socket storms that can crash the daemon on Windows
+        time.sleep(3)
+
         # Wait for readiness with subprocess monitoring
         start_time = time.time()
         with console.status("[yellow]Initializing CHIMERA...[/yellow]"):
             while time.time() - start_time < STARTUP_WAIT:
-                # Check if subprocess crashed
+                # Check if subprocess crashed BEFORE trying to connect
                 return_code = self._server_process.poll()
                 if return_code is not None:
                     # Process exited - read error output
@@ -435,13 +444,14 @@ class ChimeraShell:
                         console.print("[dim]No error output captured[/dim]")
                     return
 
-                # Check if daemon is ready
-                if self.daemon.wait_for_ready(timeout=2):
+                # Check if daemon is ready (increased timeout for startup)
+                if self.daemon.wait_for_ready(timeout=5):
                     console.print("[green]All systems ready[/green]")
                     self.daemon.running = True
                     return
 
-                time.sleep(1)
+                # Don't sleep here - wait_for_ready already has its own sleep
+                # Just check subprocess health between readiness polls
 
         # Timeout reached - check final state
         if self.daemon.health_check():

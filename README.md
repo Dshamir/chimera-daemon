@@ -200,6 +200,18 @@ docker run -v ~/.chimera:/root/.chimera -p 7777:7777 chimera-daemon
 | `Connection refused :7777` | Start daemon: `chimera serve --dev` |
 | `database is locked` | Restart daemon, wait for operations to complete |
 | `Daemon not responding` | Heavy operation in progress - check `chimera dashboard` |
+| `Exit code 3221225477` (Windows) | Fixed in v0.1.0 - update to latest version |
+| `WinError 10054` (Windows) | Fixed in v0.1.0 - startup race condition resolved |
+
+### Windows-Specific Notes
+
+CHIMERA is fully compatible with Windows. Key compatibility features:
+
+- **Event Loop**: Uses `WindowsSelectorEventLoopPolicy` for C extension compatibility (ChromaDB)
+- **Startup**: 3-second delay before readiness polling to prevent socket storms
+- **Paths**: Supports both Windows (`C:\Users\...`) and WSL (`/mnt/c/...`) paths
+
+If you encounter Windows-specific issues, ensure you have the latest version.
 
 ### Health Checks
 
@@ -238,10 +250,12 @@ With 6.6M entities, correlation takes ~3 minutes. The daemon remains responsive 
 | 2 | Extractors & Index | ✅ Complete |
 | 3 | Correlation Engine | ✅ Complete |
 | 4 | Integration & Polish | ✅ Complete |
-| 5 | Bug Fixes & Hardening | 🔄 In Progress |
+| 5 | Bug Fixes & Hardening | ✅ Complete |
 
 ### Recent Fixes (Sprint 5)
 
+- Fixed Windows daemon crash (exit code 3221225477) - C extension compatibility
+- Fixed startup race condition causing socket storms on Windows
 - Fixed multimedia metadata storage (image, audio, GPS)
 - Improved error handling (fail fast, not silent)
 - Added integration tests for multimedia pipeline

@@ -628,21 +628,30 @@ def run_daemon(
     config: ChimeraConfig | None = None,
 ) -> None:
     global _daemon
-    
+
+    import sys
+
+    # CRITICAL: On Windows, use SelectorEventLoopPolicy instead of ProactorEventLoopPolicy
+    # ProactorEventLoop is incompatible with C extensions like ChromaDB's hnswlib,
+    # causing access violations (exit code 3221225477 / 0xC0000005)
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        logger.debug("Windows detected: Using SelectorEventLoopPolicy for C extension compatibility")
+
     log_level = "DEBUG" if dev_mode else "INFO"
     setup_logging(level=log_level)
-    
+
     _daemon = ChimeraDaemon(config=config, dev_mode=dev_mode)
     app = create_app(_daemon)
-    
+
     def handle_signal(signum: int, frame: object) -> None:
         logger.info(f"Received signal {signum}, initiating shutdown...")
         if _daemon:
             _daemon._shutdown_event.set()
-    
+
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
-    
+
     logger.info(f"Starting API server on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_level="warning" if not dev_mode else "info")
 

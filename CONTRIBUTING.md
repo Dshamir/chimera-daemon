@@ -198,6 +198,27 @@ asyncio.run_coroutine_threadsafe(async_function(), loop)
 asyncio.create_task(async_function())  # RuntimeError!
 ```
 
+### Windows Compatibility
+
+When writing code that runs on Windows:
+
+```python
+# GOOD: Set event loop policy before running async code with C extensions
+import sys
+import asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# BAD: Using default ProactorEventLoop with C extensions (ChromaDB, hnswlib)
+# This causes exit code 3221225477 (Access Violation)
+```
+
+Key Windows considerations:
+- **Event Loop**: Use `WindowsSelectorEventLoopPolicy` for C extension compatibility
+- **Socket Cleanup**: Use single `httpx.Client` instance to prevent socket exhaustion
+- **Startup Timing**: Add delays before polling newly spawned subprocesses
+
 ## Pull Request Process
 
 ### Before Submitting
@@ -275,6 +296,17 @@ rm ~/.chimera/*.db-journal
 rm ~/.chimera/*.db-wal
 rm ~/.chimera/*.db-shm
 ```
+
+### Windows Daemon Crash (Exit Code 3221225477)
+
+If the daemon crashes with exit code 3221225477 on Windows:
+- This is a memory access violation (0xC0000005)
+- Usually caused by ProactorEventLoop + C extensions (ChromaDB)
+- **Solution**: Ensure `WindowsSelectorEventLoopPolicy` is set in `daemon.py`
+
+If you see `WinError 10054` (connection reset):
+- Caused by socket pool exhaustion from rapid connection attempts
+- **Solution**: Use single `httpx.Client` instance, add startup delays
 
 ### Import Errors
 

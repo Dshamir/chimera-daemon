@@ -73,34 +73,47 @@ def create_api_app(
 
         Use this endpoint to wait for system to be fully ready before
         accepting commands. More comprehensive than /health.
+
+        IMPORTANT: This endpoint is designed to be safe during startup.
+        It returns early if daemon is not initialized, preventing database
+        access before the startup sequence completes.
         """
         from chimera.daemon import get_daemon
 
         checks = {}
-        all_ready = True
 
-        # 1. Daemon running
+        # 1. Daemon exists and is running
         try:
             daemon = get_daemon()
             checks["daemon"] = daemon.running
-            if not daemon.running:
-                all_ready = False
         except RuntimeError:
-            checks["daemon"] = False
-            all_ready = False
+            # Daemon not initialized yet - return immediately
+            # Don't try to access database during this state
+            return {
+                "ready": False,
+                "reason": "daemon_not_initialized",
+                "checks": {"daemon": False},
+                "version": __version__,
+            }
 
-        # 2. Startup sequence completed
-        try:
-            daemon = get_daemon()
-            startup_complete = getattr(daemon, "_startup_complete", False)
-            checks["startup_complete"] = startup_complete
-            if not startup_complete:
-                all_ready = False
-        except RuntimeError:
-            checks["startup_complete"] = False
-            all_ready = False
+        # 2. Startup sequence completed - MUST check this before DB access
+        startup_complete = getattr(daemon, "_startup_complete", False)
+        checks["startup_complete"] = startup_complete
 
-        # 3. Database accessible
+        if not startup_complete:
+            # Startup still in progress - don't try to access DB yet
+            # This prevents "database is locked" errors during initialization
+            return {
+                "ready": False,
+                "reason": "startup_in_progress",
+                "checks": checks,
+                "version": __version__,
+            }
+
+        # Only perform DB checks AFTER startup is complete
+        all_ready = daemon.running and startup_complete
+
+        # 3. Database accessible (only check after startup complete)
         try:
             from chimera.storage.catalog import CatalogDB
 
@@ -116,16 +129,12 @@ def create_api_app(
 
         # 4. Job queue accessible
         try:
-            daemon = get_daemon()
             if daemon.queue:
                 await daemon.queue.get_pending_count()
                 checks["job_queue"] = True
             else:
                 checks["job_queue"] = False
                 all_ready = False
-        except RuntimeError:
-            checks["job_queue"] = False
-            all_ready = False
         except Exception as e:
             checks["job_queue"] = False
             checks["job_queue_error"] = str(e)
@@ -133,9 +142,8 @@ def create_api_app(
 
         # 5. Watcher running
         try:
-            daemon = get_daemon()
             checks["watcher"] = daemon.watcher.is_running if daemon.watcher else False
-        except RuntimeError:
+        except Exception:
             checks["watcher"] = False
 
         return {

@@ -78,7 +78,7 @@ chimera-daemon/
 | 2 | Extractors & Index | ✅ Complete |
 | 3 | Correlation Engine | ✅ Complete |
 | 4 | Integration & Polish | ✅ Complete |
-| 5 | Bug Fixes & Hardening | ✅ In Progress |
+| 5 | Bug Fixes & Hardening | ✅ Complete |
 
 ## Sprint 4 Deliverables
 
@@ -536,7 +536,74 @@ After first correlation run, timing is saved. Subsequent correlations show:
 
 ### 2026-01-08 — Sprint 5: Bug Fixes & Hardening
 
-Critical bug fixes for multimedia metadata storage and improved error handling.
+Critical bug fixes for Windows daemon crashes, multimedia metadata storage, and improved error handling.
+
+#### Issue 11: Windows Daemon Crash (Exit Code 3221225477)
+
+**Symptom:**
+```
+WinError 10054: An existing connection was forcibly closed by the remote host
+Daemon process exited with code 3221225477
+```
+
+Exit code 3221225477 = 0xC0000005 = Windows Access Violation. Crash happened AFTER successful model loading ("Collection ready: documents").
+
+**Root Causes:**
+
+1. **Windows ProactorEventLoop incompatible with C extensions**
+   - Windows defaults to `ProactorEventLoop` with Uvicorn
+   - ChromaDB uses `hnswlib` (C++ extension)
+   - ProactorEventLoop + C extensions = memory corruption
+
+2. **Startup race condition**
+   - Shell polled `/readiness` immediately after spawning daemon
+   - Daemon still initializing (10-60+ seconds for models)
+   - Rapid connection attempts caused socket pool exhaustion
+
+3. **Database access during startup**
+   - `/readiness` endpoint tried to access DB before startup complete
+   - Caused "database is locked" errors during initialization
+
+**Fixes:**
+
+| Fix | File | Change |
+|-----|------|--------|
+| Windows event loop policy | `daemon.py:647` | Use `WindowsSelectorEventLoopPolicy` |
+| Initial startup delay | `shell.py:417` | 3-second delay before first poll |
+| Poll interval | `shell.py:444` | Increased from 1s to 2s |
+| Readiness timeout | `shell.py:439` | Increased from 2s to 5s |
+| Single httpx.Client | `shell.py:wait_for_ready()` | Prevents socket exhaustion |
+| Defensive /readiness | `server.py:70-145` | Return early if startup in progress |
+
+**Key Code Changes:**
+
+```python
+# daemon.py - Windows event loop fix
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# shell.py - Startup race condition fix
+time.sleep(3)  # Initial delay before polling
+with httpx.Client(timeout=READINESS_TIMEOUT) as client:  # Single client
+    while time.time() - start < timeout:
+        # ... poll with 2-second intervals
+
+# server.py - Defensive readiness endpoint
+if not startup_complete:
+    return {"ready": False, "reason": "startup_in_progress"}
+```
+
+**Files Modified:**
+- `src/chimera/daemon.py` — WindowsSelectorEventLoopPolicy for Windows
+- `src/chimera/shell.py` — Startup race condition, single httpx.Client
+- `src/chimera/api/server.py` — Defensive /readiness endpoint
+
+**Verification:**
+Daemon now starts successfully on Windows without crash. Tested with:
+- ChromaDB initialization (no access violation)
+- Model loading (spaCy, sentence-transformers)
+- Image processing (metadata storage)
+- 45+ seconds runtime without crash
 
 #### Issue 7: Image Metadata Storage Fails
 
@@ -713,6 +780,8 @@ All daemon responsiveness fixes preserved:
 | `unexpected keyword argument` | API signature mismatch | Construct dataclass, don't pass kwargs |
 | `Daemon not responding` | Heavy operation blocking | Wait for correlation to complete (check dashboard) |
 | `Connection refused :7777` | Daemon not running | Start with `chimera serve --dev` |
+| `Exit code 3221225477` | Windows ProactorEventLoop + C extensions | Fixed in Sprint 5 (WindowsSelectorEventLoopPolicy) |
+| `WinError 10054` | Windows socket reset during startup | Fixed in Sprint 5 (startup race condition) |
 
 ### Health Check Troubleshooting
 
