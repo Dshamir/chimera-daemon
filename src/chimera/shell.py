@@ -3,9 +3,16 @@
 One terminal. One command. Everything integrated.
 """
 
-import asyncio
-import os
+# CRITICAL: Set Windows event loop policy BEFORE any other imports
+# This must be the very first thing to avoid C extension crashes (ChromaDB/hnswlib)
 import sys
+if sys.platform == "win32":
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+else:
+    import asyncio
+
+import os
 import signal
 import threading
 import time
