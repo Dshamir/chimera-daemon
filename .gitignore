@@ -22,6 +22,7 @@ wheels/
 
 # Virtual environment
 venv/
+venv-wsl/
 ENV/
 env/
 .venv/
@@ -43,10 +44,4 @@ Thumbs.db
 *.db-shm
 
 # Temporary files
-*.txt
-*.png
-5
-"80%\""
-App
-Single
-The
+thumbnails/
