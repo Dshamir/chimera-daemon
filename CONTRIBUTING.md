@@ -203,19 +203,28 @@ asyncio.create_task(async_function())  # RuntimeError!
 When writing code that runs on Windows:
 
 ```python
-# GOOD: Set event loop policy before running async code with C extensions
+# GOOD: Set event loop policy at the VERY TOP of entry point files (cli.py, shell.py)
+# This MUST be before any other imports that might use asyncio
 import sys
-import asyncio
-
 if sys.platform == "win32":
+    import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# BAD: Using default ProactorEventLoop with C extensions (ChromaDB, hnswlib)
-# This causes exit code 3221225477 (Access Violation)
+# Then continue with other imports
+import json
+from pathlib import Path
+# ...
+
+# BAD: Setting policy later (e.g., before uvicorn.run()) - too late!
+# Other modules may have already imported asyncio and created event loops
+def run_server():
+    asyncio.set_event_loop_policy(...)  # TOO LATE - crash still happens
+    uvicorn.run(app)
 ```
 
 Key Windows considerations:
-- **Event Loop**: Use `WindowsSelectorEventLoopPolicy` for C extension compatibility
+- **Event Loop**: Set `WindowsSelectorEventLoopPolicy` at module load time (top of file)
+- **Entry Points**: Fix must be in CLI entry points (`cli.py`, `shell.py`), not just `daemon.py`
 - **Socket Cleanup**: Use single `httpx.Client` instance to prevent socket exhaustion
 - **Startup Timing**: Add delays before polling newly spawned subprocesses
 
@@ -301,8 +310,9 @@ rm ~/.chimera/*.db-shm
 
 If the daemon crashes with exit code 3221225477 on Windows:
 - This is a memory access violation (0xC0000005)
-- Usually caused by ProactorEventLoop + C extensions (ChromaDB)
-- **Solution**: Ensure `WindowsSelectorEventLoopPolicy` is set in `daemon.py`
+- Caused by ProactorEventLoop + C extensions (ChromaDB/hnswlib)
+- **Solution**: Set `WindowsSelectorEventLoopPolicy` at the VERY TOP of entry point files (`cli.py`, `shell.py`) - before any other imports
+- **Note**: Setting the policy in `daemon.py` before `uvicorn.run()` is NOT sufficient
 
 If you see `WinError 10054` (connection reset):
 - Caused by socket pool exhaustion from rapid connection attempts

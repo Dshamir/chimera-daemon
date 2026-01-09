@@ -568,7 +568,7 @@ Exit code 3221225477 = 0xC0000005 = Windows Access Violation. Crash happened AFT
 
 | Fix | File | Change |
 |-----|------|--------|
-| Windows event loop policy | `daemon.py:647` | Use `WindowsSelectorEventLoopPolicy` |
+| Windows event loop policy | `cli.py:5-8`, `shell.py:6-13` | Set `WindowsSelectorEventLoopPolicy` at module load |
 | Initial startup delay | `shell.py:417` | 3-second delay before first poll |
 | Poll interval | `shell.py:444` | Increased from 1s to 2s |
 | Readiness timeout | `shell.py:439` | Increased from 2s to 5s |
@@ -578,8 +578,10 @@ Exit code 3221225477 = 0xC0000005 = Windows Access Violation. Crash happened AFT
 **Key Code Changes:**
 
 ```python
-# daemon.py - Windows event loop fix
+# cli.py / shell.py - Windows event loop fix (MUST be at very top, before any imports)
+import sys
 if sys.platform == "win32":
+    import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # shell.py - Startup race condition fix
@@ -593,9 +595,12 @@ if not startup_complete:
     return {"ready": False, "reason": "startup_in_progress"}
 ```
 
+**Critical Note:** The event loop policy MUST be set at module load time (top of file), BEFORE any other imports. Setting it in `daemon.py` before `uvicorn.run()` was too late - other modules had already imported asyncio and created event loops.
+
 **Files Modified:**
-- `src/chimera/daemon.py` — WindowsSelectorEventLoopPolicy for Windows
-- `src/chimera/shell.py` — Startup race condition, single httpx.Client
+- `src/chimera/cli.py` — WindowsSelectorEventLoopPolicy at module load (lines 5-8)
+- `src/chimera/shell.py` — WindowsSelectorEventLoopPolicy at module load (lines 6-13)
+- `src/chimera/daemon.py` — Backup policy setting (redundant but safe)
 - `src/chimera/api/server.py` — Defensive /readiness endpoint
 
 **Verification:**
@@ -603,7 +608,7 @@ Daemon now starts successfully on Windows without crash. Tested with:
 - ChromaDB initialization (no access violation)
 - Model loading (spaCy, sentence-transformers)
 - Image processing (metadata storage)
-- 45+ seconds runtime without crash
+- 60+ seconds runtime without crash
 
 #### Issue 7: Image Metadata Storage Fails
 
