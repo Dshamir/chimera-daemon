@@ -703,16 +703,32 @@ Created `tests/test_multimedia.py` with integration tests for:
 
 **Root Cause:** WSL uses Linux home directory (`~/.chimera` = `/home/user/.chimera`) but existing data is stored at Windows path (`C:\Users\UserName\.chimera`).
 
-**Fix:** Updated `scripts/wsl-setup.sh` to automatically detect and symlink Windows data:
+**Manual Fix (if ~/.chimera directory already exists):**
 ```bash
-# Automatically creates symlink if Windows data exists
-ln -s /mnt/c/Users/YourName/.chimera ~/.chimera
+# 1. Stop daemon first
+chimera stop
+# Or Ctrl+C in daemon terminal, or:
+pkill -f "uvicorn.*chimera"
+
+# 2. Remove empty WSL directory
+rm -rf ~/.chimera
+
+# 3. Create symlink to Windows data
+ln -s /mnt/c/Users/YourWindowsUsername/.chimera ~/.chimera
+
+# 4. Verify symlink
+ls -la ~/.chimera
+# Should show: .chimera -> /mnt/c/Users/YourWindowsUsername/.chimera
+
+# 5. Restart daemon
+chimera serve --dev
 ```
 
+**Note:** The `wsl-setup.sh` script has auto-symlink logic but only runs if `~/.chimera` doesn't exist yet. If the daemon created an empty directory before you ran setup, you need the manual fix above.
+
 **Files Modified:**
-- `scripts/wsl-setup.sh` — Auto-detect Windows data and create symlink
-- `README.md` — Added WSL data path documentation
-- `CLAUDE.md` — Added troubleshooting entry
+- `scripts/wsl-setup.sh` — Auto-detect Windows data and create symlink (for fresh installs)
+- `CLAUDE.md` — Added manual fix instructions
 
 ### 2026-01-07 — PR #1 Multimedia Extraction Pipeline Merge
 

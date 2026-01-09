@@ -56,21 +56,47 @@ echo ""
 WINDOWS_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')
 WINDOWS_DATA="/mnt/c/Users/$WINDOWS_USER/.chimera"
 
-if [ -d "$WINDOWS_DATA" ] && [ ! -e "$HOME/.chimera" ]; then
-    echo "[*] Found existing CHIMERA data at: $WINDOWS_DATA"
-    echo "[*] Creating symlink: ~/.chimera -> $WINDOWS_DATA"
-    ln -s "$WINDOWS_DATA" "$HOME/.chimera"
-    echo "[*] Symlink created! Your existing data will be used."
-    echo ""
-elif [ -d "$WINDOWS_DATA" ] && [ -L "$HOME/.chimera" ]; then
-    echo "[*] Symlink already exists: ~/.chimera -> $(readlink $HOME/.chimera)"
-    echo ""
-elif [ -d "$HOME/.chimera" ]; then
-    echo "[*] Using existing WSL data at: ~/.chimera"
-    echo ""
+if [ -d "$WINDOWS_DATA" ]; then
+    WINDOWS_SIZE=$(du -s "$WINDOWS_DATA" 2>/dev/null | cut -f1 || echo "0")
+
+    if [ -L "$HOME/.chimera" ]; then
+        # Already a symlink
+        echo "[*] Symlink already exists: ~/.chimera -> $(readlink $HOME/.chimera)"
+        echo ""
+    elif [ -d "$HOME/.chimera" ]; then
+        # Directory exists - check if it's small/empty compared to Windows
+        WSL_SIZE=$(du -s "$HOME/.chimera" 2>/dev/null | cut -f1 || echo "0")
+
+        # If Windows data is > 100MB and WSL is < 10MB, offer to replace
+        if [ "$WINDOWS_SIZE" -gt 100000 ] && [ "$WSL_SIZE" -lt 10000 ]; then
+            echo "[!] Found large Windows data ($(($WINDOWS_SIZE/1024))MB) but small WSL data ($(($WSL_SIZE/1024))MB)"
+            echo "[*] Replacing WSL directory with symlink to Windows data..."
+            rm -rf "$HOME/.chimera"
+            ln -s "$WINDOWS_DATA" "$HOME/.chimera"
+            echo "[*] Symlink created! Your Windows data will be used."
+            echo ""
+        else
+            echo "[*] Using existing WSL data at: ~/.chimera"
+            echo "[*] Windows data also exists at: $WINDOWS_DATA"
+            echo "[*] To use Windows data instead, run:"
+            echo "      rm -rf ~/.chimera && ln -s $WINDOWS_DATA ~/.chimera"
+            echo ""
+        fi
+    elif [ ! -e "$HOME/.chimera" ]; then
+        # Nothing exists - create symlink
+        echo "[*] Found existing CHIMERA data at: $WINDOWS_DATA"
+        echo "[*] Creating symlink: ~/.chimera -> $WINDOWS_DATA"
+        ln -s "$WINDOWS_DATA" "$HOME/.chimera"
+        echo "[*] Symlink created! Your existing data will be used."
+        echo ""
+    fi
 else
-    echo "[*] No existing data found. Fresh installation."
-    echo "[*] Data will be stored at: ~/.chimera"
+    if [ -d "$HOME/.chimera" ]; then
+        echo "[*] Using existing WSL data at: ~/.chimera"
+    else
+        echo "[*] No existing data found. Fresh installation."
+        echo "[*] Data will be stored at: ~/.chimera"
+    fi
     echo ""
 fi
 

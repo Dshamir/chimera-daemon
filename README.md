@@ -221,12 +221,24 @@ scripts\chimera-wsl.bat serve --dev
 
 **Important - WSL Data Path:**
 
-WSL uses `~/.chimera` (Linux path) for data. If you have existing data from Windows native mode at `C:\Users\YourName\.chimera`, the setup script will automatically create a symlink. If you need to do this manually:
+WSL uses `~/.chimera` (Linux path) for data. If you have existing data from Windows native mode at `C:\Users\YourName\.chimera`, the setup script will automatically detect and symlink it.
+
+If the daemon created an empty `~/.chimera` directory before you ran setup, you may need to manually fix it:
 
 ```bash
-# Link WSL path to existing Windows data
+# Stop daemon first
+chimera stop  # or pkill -f "uvicorn.*chimera"
+
+# Remove empty WSL directory and create symlink
+rm -rf ~/.chimera
 ln -s /mnt/c/Users/YourName/.chimera ~/.chimera
+
+# Verify and restart
+ls -la ~/.chimera  # Should show symlink
+chimera serve --dev
 ```
+
+**Symptom:** Dashboard shows all zeros (Files: 0, Chunks: 0) despite data existing.
 
 **Note:** These are separate deployment options. The venv is for local development, Docker is for production, WSL is for Windows users who want Linux-native behavior. They are NOT nested.
 
