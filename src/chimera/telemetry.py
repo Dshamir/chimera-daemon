@@ -97,8 +97,12 @@ class TelemetryState:
     multimedia: dict = field(default_factory=dict)
 
 
-def api_request(endpoint: str, timeout: float = 5.0) -> dict | None:
-    """Make API request to daemon."""
+def api_request(endpoint: str, timeout: float = 15.0) -> dict | None:
+    """Make API request to daemon.
+
+    Note: The telemetry endpoint can take 10+ seconds on large databases,
+    so the default timeout is set to 15 seconds.
+    """
     try:
         response = httpx.get(f"{DEFAULT_API_URL}{endpoint}", timeout=timeout)
         return response.json()

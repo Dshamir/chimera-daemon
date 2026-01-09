@@ -321,15 +321,105 @@ async def get_recent_jobs(limit: int = 10) -> dict:
 
 @router.get("/telemetry")
 async def get_telemetry() -> dict:
-    """Get comprehensive telemetry data for dashboard."""
+    """Get comprehensive telemetry data for dashboard.
+
+    Optimized to use a single database connection for all queries.
+    """
     import os
+    from pathlib import Path
 
     try:
         daemon = get_daemon()
-        status = daemon.get_status()
 
-        # System stats
-        system = {}
+        # Use daemon's catalog if available, otherwise create one instance
+        # This avoids multiple expensive CatalogDB initializations
+        from chimera.storage.catalog import CatalogDB
+        catalog = daemon.pipeline.catalog if daemon.pipeline else CatalogDB()
+
+        # Get all stats in one connection
+        conn = catalog.get_connection()
+        cursor = conn.cursor()
+
+        # === Catalog Stats (combined queries) ===
+        catalog_stats = {}
+
+        # File counts by status
+        cursor.execute("SELECT status, COUNT(*) FROM files GROUP BY status")
+        catalog_stats["files_by_status"] = dict(cursor.fetchall())
+
+        # File counts by extension
+        cursor.execute("""
+            SELECT extension, COUNT(*) FROM files
+            WHERE extension IS NOT NULL
+            GROUP BY extension ORDER BY COUNT(*) DESC LIMIT 10
+        """)
+        catalog_stats["files_by_extension"] = dict(cursor.fetchall())
+
+        # Total counts
+        cursor.execute("SELECT COUNT(*) FROM files")
+        catalog_stats["total_files"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM chunks")
+        catalog_stats["total_chunks"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM entities")
+        catalog_stats["total_entities"] = cursor.fetchone()[0]
+
+        # Entity counts by type
+        cursor.execute("""
+            SELECT entity_type, COUNT(*) FROM entities
+            GROUP BY entity_type ORDER BY COUNT(*) DESC LIMIT 10
+        """)
+        catalog_stats["entities_by_type"] = dict(cursor.fetchall())
+
+        cursor.execute("SELECT COUNT(*) FROM discoveries WHERE status = 'active'")
+        catalog_stats["active_discoveries"] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM conversations")
+        catalog_stats["total_conversations"] = cursor.fetchone()[0]
+
+        # === Discovery Stats ===
+        cursor.execute("""
+            SELECT discovery_type, COUNT(*) FROM discoveries
+            GROUP BY discovery_type ORDER BY COUNT(*) DESC
+        """)
+        discoveries_by_type = dict(cursor.fetchall())
+
+        cursor.execute("""
+            SELECT id, discovery_type, title, confidence, status
+            FROM discoveries WHERE status = 'active'
+            ORDER BY confidence DESC LIMIT 5
+        """)
+        top_discoveries = [
+            {"id": row[0], "type": row[1], "title": row[2], "confidence": row[3], "status": row[4]}
+            for row in cursor.fetchall()
+        ]
+
+        # === Multimedia Stats ===
+        multimedia = {
+            "images_indexed": 0, "images_with_gps": 0, "images_with_ai": 0,
+            "audio_files": 0, "audio_transcribed": 0, "unique_locations": 0,
+        }
+        try:
+            cursor.execute("SELECT COUNT(*) FROM image_metadata")
+            multimedia["images_indexed"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM image_metadata WHERE latitude IS NOT NULL")
+            multimedia["images_with_gps"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM image_metadata WHERE ai_description IS NOT NULL")
+            multimedia["images_with_ai"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM audio_metadata")
+            multimedia["audio_files"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM audio_metadata WHERE transcription_status = 'completed'")
+            multimedia["audio_transcribed"] = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(DISTINCT location_name) FROM gps_locations WHERE location_name IS NOT NULL")
+            multimedia["unique_locations"] = cursor.fetchone()[0]
+        except Exception:
+            pass  # Tables may not exist yet
+
+        conn.close()
+
+        # === System Stats (psutil) ===
+        system = {"cpu_percent": 0, "memory_used_gb": 0, "memory_total_gb": 16, "memory_percent": 0}
         try:
             import psutil
             system["cpu_percent"] = psutil.cpu_percent(interval=None)
@@ -337,8 +427,6 @@ async def get_telemetry() -> dict:
             system["memory_used_gb"] = mem.used / (1024**3)
             system["memory_total_gb"] = mem.total / (1024**3)
             system["memory_percent"] = mem.percent
-
-            # Disk I/O
             try:
                 io = psutil.disk_io_counters()
                 system["disk_read_bytes"] = io.read_bytes
@@ -346,158 +434,90 @@ async def get_telemetry() -> dict:
             except Exception:
                 pass
         except ImportError:
-            system["cpu_percent"] = 0
-            system["memory_used_gb"] = 0
-            system["memory_total_gb"] = 16
+            pass
 
-        # GPU info - try nvidia-smi first (works even with CPU PyTorch)
+        # === GPU Stats (nvidia-smi) ===
         gpu = {"available": False}
         try:
             import subprocess
             result = subprocess.run(
                 ['nvidia-smi', '--query-gpu=name,memory.total,memory.used,utilization.gpu',
                  '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=2
             )
             if result.returncode == 0 and result.stdout.strip():
                 parts = result.stdout.strip().split(', ')
                 if len(parts) >= 4:
-                    gpu["available"] = True
-                    gpu["device"] = parts[0].strip()
-                    gpu["memory_total_gb"] = float(parts[1].strip()) / 1024
-                    gpu["memory_used_gb"] = float(parts[2].strip()) / 1024
-                    gpu["utilization_percent"] = float(parts[3].strip())
+                    gpu = {
+                        "available": True,
+                        "device": parts[0].strip(),
+                        "memory_total_gb": float(parts[1].strip()) / 1024,
+                        "memory_used_gb": float(parts[2].strip()) / 1024,
+                        "utilization_percent": float(parts[3].strip()),
+                    }
         except Exception:
             pass
 
-        # Fallback to PyTorch if nvidia-smi failed
-        if not gpu["available"]:
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    gpu["available"] = True
-                    gpu["device"] = torch.cuda.get_device_name(0)
-                    gpu["memory_allocated_gb"] = torch.cuda.memory_allocated(0) / (1024**3)
-                    gpu["memory_total_gb"] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            except ImportError:
-                pass
-
-        # Current operation (from daemon tracking or job queue)
+        # === Current Operation ===
         current_job = daemon.get_current_operation()
         if not current_job and daemon.queue:
-            # Fall back to job queue if no tracked operation
             job = await daemon.queue.get_current_job()
             if job:
-                elapsed = None
-                if job.started_at:
-                    from datetime import datetime
-                    elapsed = (datetime.now() - job.started_at).total_seconds()
+                from datetime import datetime
+                elapsed = (datetime.now() - job.started_at).total_seconds() if job.started_at else None
                 current_job = {
-                    "id": job.id,
-                    "type": job.job_type.value,
-                    "payload": job.payload,
-                    "elapsed_seconds": elapsed,
-                    "eta_seconds": None,
+                    "id": job.id, "type": job.job_type.value,
+                    "payload": job.payload, "elapsed_seconds": elapsed, "eta_seconds": None,
                 }
 
-        # Get patterns count from daemon or correlation engine
+        # === Patterns Count ===
         patterns_detected = daemon.patterns_detected
-        if patterns_detected == 0:
+        if patterns_detected == 0 and daemon.correlation_engine:
             try:
-                # Try to get from correlation engine stats
-                if daemon.correlation_engine:
-                    patterns_detected = len(daemon.correlation_engine.pattern_detector._patterns)
+                patterns_detected = len(daemon.correlation_engine.pattern_detector._patterns)
             except Exception:
                 pass
 
-        # Database sizes
-        from pathlib import Path
+        # === Storage Sizes ===
         config_dir = Path(os.path.expanduser("~/.chimera"))
-        catalog_size = 0
-        jobs_db_size = 0
-        vectors_size = 0
+        catalog_size = (config_dir / "catalog.db").stat().st_size / (1024**2) if (config_dir / "catalog.db").exists() else 0
+        jobs_db_size = (config_dir / "jobs.db").stat().st_size / (1024**2) if (config_dir / "jobs.db").exists() else 0
+        vectors_size = sum(
+            f.stat().st_size for f in (config_dir / "vectors").rglob("*") if f.is_file()
+        ) / (1024**3) if (config_dir / "vectors").exists() else 0
 
-        if (config_dir / "catalog.db").exists():
-            catalog_size = (config_dir / "catalog.db").stat().st_size / (1024**2)
-        if (config_dir / "jobs.db").exists():
-            jobs_db_size = (config_dir / "jobs.db").stat().st_size / (1024**2)
-        if (config_dir / "vectors").exists():
-            vectors_size = sum(
-                f.stat().st_size for f in (config_dir / "vectors").rglob("*") if f.is_file()
-            ) / (1024**3)
-
-        # Get entity type counts from catalog
-        catalog_stats = status.get("catalog", {})
-
-        # Get discovery counts from database
-        discoveries_by_type = {}
-        try:
-            from chimera.storage.catalog import CatalogDB
-            catalog = CatalogDB()
-            conn = catalog.get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT discovery_type, COUNT(*) FROM discoveries
-                GROUP BY discovery_type ORDER BY COUNT(*) DESC
-            """)
-            discoveries_by_type = dict(cursor.fetchall())
-
-            # Get top discoveries for display
-            cursor.execute("""
-                SELECT id, discovery_type, title, confidence, status
-                FROM discoveries
-                WHERE status = 'active'
-                ORDER BY confidence DESC
-                LIMIT 5
-            """)
-            top_discoveries = [
-                {
-                    "id": row[0],
-                    "type": row[1],
-                    "title": row[2],
-                    "confidence": row[3],
-                    "status": row[4],
-                }
-                for row in cursor.fetchall()
-            ]
-            conn.close()
-        except Exception:
-            top_discoveries = []
-
-        # Get multimedia stats
-        multimedia = {
-            "images_indexed": 0,
-            "images_with_gps": 0,
-            "images_with_ai": 0,
-            "audio_files": 0,
-            "audio_transcribed": 0,
-            "unique_locations": 0,
+        # Build status dict (avoiding extra get_status call)
+        status = {
+            "version": daemon.version if hasattr(daemon, 'version') else "0.1.0",
+            "running": daemon.running,
+            "uptime_seconds": daemon.uptime_seconds,
+            "started_at": daemon.started_at.isoformat() if daemon.started_at else None,
+            "dev_mode": daemon.dev_mode,
+            "stats": {
+                "files_detected": daemon.files_detected,
+                "files_indexed": daemon.files_indexed,
+                "jobs_processed": daemon.jobs_processed,
+                "jobs_failed": daemon.jobs_failed,
+                "correlations_run": daemon.correlations_run,
+                "patterns_detected": daemon.patterns_detected,
+                "discoveries_surfaced": daemon.discoveries_surfaced,
+            },
+            "catalog": catalog_stats,
+            "vectors": {},
+            "correlation": {},
+            "config": {
+                "sources": len(daemon.config.sources),
+                "fae_enabled": daemon.config.fae.enabled,
+                "api_port": daemon.config.api.port,
+            },
         }
-        try:
-            from chimera.storage.catalog import CatalogDB
-            catalog = CatalogDB()
-            stats = catalog.get_multimedia_stats()
-            multimedia = {
-                "images_indexed": stats.get("images_total", 0),
-                "images_with_gps": stats.get("images_with_gps", 0),
-                "images_with_ai": stats.get("images_with_ai", 0),
-                "audio_files": stats.get("audio_total", 0),
-                "audio_transcribed": stats.get("audio_transcribed", 0),
-                "unique_locations": stats.get("unique_locations", 0),
-            }
-        except Exception:
-            pass
 
         return {
             "status": status,
             "system": system,
             "gpu": gpu,
             "current_job": current_job,
-            "storage": {
-                "catalog_mb": catalog_size,
-                "jobs_db_mb": jobs_db_size,
-                "vectors_gb": vectors_size,
-            },
+            "storage": {"catalog_mb": catalog_size, "jobs_db_mb": jobs_db_size, "vectors_gb": vectors_size},
             "entities_by_type": catalog_stats.get("entities_by_type", {}),
             "patterns_detected": patterns_detected,
             "discoveries_by_type": discoveries_by_type,
