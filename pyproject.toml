@@ -65,6 +65,7 @@ gpu = [
 
 [project.scripts]
 chimera = "chimera.cli:main"
+chimera-bootstrap = "chimera._bootstrap:main"
 
 [project.urls]
 Homepage = "https://github.com/Dshamir/chimera-daemon"

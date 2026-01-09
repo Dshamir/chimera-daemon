@@ -597,18 +597,40 @@ if not startup_complete:
 
 **Critical Note:** The event loop policy MUST be set at module load time (top of file), BEFORE any other imports. Setting it in `daemon.py` before `uvicorn.run()` was too late - other modules had already imported asyncio and created event loops.
 
-**Files Modified:**
-- `src/chimera/cli.py` — WindowsSelectorEventLoopPolicy at module load (lines 5-8)
-- `src/chimera/shell.py` — WindowsSelectorEventLoopPolicy at module load (lines 6-13)
-- `src/chimera/daemon.py` — Backup policy setting (redundant but safe)
+**Final Solution: Bootstrap Architecture**
+
+The shell's subprocess spawning had import order race conditions that couldn't be fixed by placing the policy at the top of cli.py. The solution was a dedicated bootstrap module:
+
+```python
+# src/chimera/_bootstrap.py - Sets policy BEFORE any imports
+import sys
+if sys.platform == "win32":
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# Now safe to import heavy dependencies
+from chimera.cli import main as cli_main
+cli_main()
+```
+
+Shell now spawns: `python -m chimera._bootstrap serve --dev` instead of `python -m chimera.cli serve --dev`
+
+**Files Created/Modified:**
+- `src/chimera/_bootstrap.py` — NEW: Bootstrap entry point with validation
+- `src/chimera/shell.py` — Use bootstrap for subprocess spawning
+- `src/chimera/cli.py` — WindowsSelectorEventLoopPolicy at module load
+- `src/chimera/daemon.py` — Backup policy setting
 - `src/chimera/api/server.py` — Defensive /readiness endpoint
+- `pyproject.toml` — Added `chimera-bootstrap` entry point
+- `scripts/wsl-setup.sh` — NEW: WSL environment setup
+- `scripts/chimera-wsl.bat` — NEW: Windows→WSL launcher
 
 **Verification:**
-Daemon now starts successfully on Windows without crash. Tested with:
+Daemon now starts successfully via bootstrap on Windows without crash. Tested with:
+- `python -m chimera._bootstrap serve --dev` — 45+ seconds no crash
 - ChromaDB initialization (no access violation)
 - Model loading (spaCy, sentence-transformers)
-- Image processing (metadata storage)
-- 60+ seconds runtime without crash
+- Full startup sequence completes
 
 #### Issue 7: Image Metadata Storage Fails
 

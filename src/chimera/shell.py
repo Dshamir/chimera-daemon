@@ -411,8 +411,10 @@ class ChimeraShell:
         project_root = Path(__file__).parent.parent.parent.parent
 
         try:
+            # Use bootstrap module to ensure event loop policy is set BEFORE any imports
+            # This fixes Windows crashes caused by ProactorEventLoop + C extensions
             self._server_process = subprocess.Popen(
-                [sys.executable, "-m", "chimera.cli", "serve", "--dev"],
+                [sys.executable, "-m", "chimera._bootstrap", "serve", "--dev"],
                 stdout=self._stdout_file,
                 stderr=self._stderr_file,
                 cwd=str(project_root),
