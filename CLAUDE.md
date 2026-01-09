@@ -26,8 +26,11 @@ chimera discoveries
 ```
 chimera-daemon/
 ├── src/chimera/
+│   ├── _bootstrap.py       # Windows bootstrap (event loop policy)
 │   ├── daemon.py           # Main orchestrator
 │   ├── cli.py              # Full CLI (Sprint 4)
+│   ├── shell.py            # Interactive shell (spawns via bootstrap)
+│   ├── startup.py          # Initialization checks
 │   ├── telemetry.py        # Real-time dashboard
 │   ├── extractors/         # Content extraction
 │   │   ├── image.py        # EXIF, GPS, thumbnails, AI vision
@@ -51,6 +54,9 @@ chimera-daemon/
 │   ├── sync/               # Graph sync utilities
 │   │   └── discovery.py    # Discovery sync
 │   └── api/                # FastAPI server
+├── scripts/
+│   ├── wsl-setup.sh        # WSL environment setup
+│   └── chimera-wsl.bat     # Windows→WSL launcher
 ├── usb-package/            # Standalone USB excavator
 └── tests/
 ```
@@ -778,8 +784,11 @@ All daemon responsiveness fixes preserved:
 
 | File | Purpose |
 |------|--------|
+| `_bootstrap.py` | Windows bootstrap (sets event loop policy BEFORE imports) |
 | `daemon.py` | Main orchestrator, operation tracking |
 | `cli.py` | Full CLI implementation |
+| `shell.py` | Interactive shell (spawns daemon via bootstrap) |
+| `startup.py` | Initialization verification checks |
 | `telemetry.py` | Real-time dashboard (Rich library) |
 | `api/routes/control.py` | API endpoints, telemetry endpoint |
 | `extractors/pipeline.py` | Extraction orchestrator |
@@ -793,6 +802,8 @@ All daemon responsiveness fixes preserved:
 | `gpu/vectors.py` | GPU-accelerated embeddings |
 | `integration/claude.py` | Claude context builder |
 | `integration/mcp.py` | MCP server |
+| `scripts/wsl-setup.sh` | WSL environment setup |
+| `scripts/chimera-wsl.bat` | Windows→WSL launcher |
 
 ---
 

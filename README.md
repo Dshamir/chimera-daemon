@@ -117,14 +117,19 @@ chimera fae "E:\AI Exports"   # Specific FAE path
 ```
 chimera-daemon/
 ├── src/chimera/
+│   ├── _bootstrap.py       # Windows bootstrap (event loop policy)
 │   ├── daemon.py           # Main orchestrator
 │   ├── cli.py              # CLI commands
+│   ├── shell.py            # Interactive shell
 │   ├── telemetry.py        # Real-time dashboard
 │   ├── extractors/         # Content extraction
 │   ├── storage/            # SQLite + ChromaDB
 │   ├── correlation/        # Intelligence layer
 │   ├── integration/        # Claude/MCP integration
 │   └── api/                # FastAPI server
+├── scripts/
+│   ├── wsl-setup.sh        # WSL environment setup
+│   └── chimera-wsl.bat     # Windows→WSL launcher
 └── tests/
 ```
 
@@ -189,7 +194,32 @@ docker build -t chimera-daemon .
 docker run -v ~/.chimera:/root/.chimera -p 7777:7777 chimera-daemon
 ```
 
-**Note:** These are separate deployment options. The venv is for local development, Docker is for production. They are NOT nested.
+### Option 3: WSL (Windows - Recommended)
+
+For Windows users, running in WSL provides the most reliable experience:
+
+```bash
+# From Windows, launch WSL
+wsl
+
+# Navigate to project
+cd /mnt/e/Software\ DEV/chimera-daemon
+
+# Run setup script (first time only)
+./scripts/wsl-setup.sh
+
+# Activate and run
+source venv-wsl/bin/activate
+chimera serve --dev
+```
+
+Or use the Windows launcher:
+
+```cmd
+scripts\chimera-wsl.bat serve --dev
+```
+
+**Note:** These are separate deployment options. The venv is for local development, Docker is for production, WSL is for Windows users who want Linux-native behavior. They are NOT nested.
 
 ## Troubleshooting
 
@@ -207,11 +237,13 @@ docker run -v ~/.chimera:/root/.chimera -p 7777:7777 chimera-daemon
 
 CHIMERA is fully compatible with Windows. Key compatibility features:
 
+- **Bootstrap Architecture**: Uses `_bootstrap.py` to set event loop policy BEFORE any imports
 - **Event Loop**: Uses `WindowsSelectorEventLoopPolicy` for C extension compatibility (ChromaDB)
 - **Startup**: 3-second delay before readiness polling to prevent socket storms
 - **Paths**: Supports both Windows (`C:\Users\...`) and WSL (`/mnt/c/...`) paths
+- **WSL Option**: For maximum stability, run via WSL (see deployment options above)
 
-If you encounter Windows-specific issues, ensure you have the latest version.
+If you encounter Windows-specific issues, try running in WSL or ensure you have the latest version.
 
 ### Health Checks
 

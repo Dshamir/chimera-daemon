@@ -11,7 +11,7 @@ Thank you for your interest in contributing to CHIMERA!
 - NVIDIA GPU (optional, for faster embeddings)
 - ~10GB disk space
 
-### Setting Up
+### Setting Up (Linux/Mac)
 
 ```bash
 # Clone the repository
@@ -20,8 +20,7 @@ cd chimera-daemon
 
 # Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or: venv\Scripts\activate  # Windows
+source venv/bin/activate
 
 # Install in development mode with all dependencies
 pip install -e ".[dev]"
@@ -32,6 +31,53 @@ chimera init
 # Verify installation
 chimera --help
 ```
+
+### Setting Up (Windows - WSL Recommended)
+
+For Windows development, WSL provides the most reliable experience:
+
+```bash
+# Launch WSL
+wsl
+
+# Navigate to project (adjust path as needed)
+cd /mnt/e/Software\ DEV/chimera-daemon
+
+# Run automated setup script
+./scripts/wsl-setup.sh
+
+# Activate and verify
+source venv-wsl/bin/activate
+chimera --help
+```
+
+Alternatively, use the Windows launcher:
+
+```cmd
+scripts\chimera-wsl.bat --help
+```
+
+### Setting Up (Windows Native)
+
+If you must use Windows natively:
+
+```cmd
+# Clone and navigate
+git clone https://github.com/Dshamir/chimera-daemon.git
+cd chimera-daemon
+
+# Create virtual environment
+python -m venv venv
+venv\Scripts\activate
+
+# Install
+pip install -e ".[dev]"
+
+# Verify
+chimera --help
+```
+
+**Note:** Windows native requires the bootstrap architecture to handle event loop policy. The daemon spawns via `_bootstrap.py` to ensure `WindowsSelectorEventLoopPolicy` is set before any imports.
 
 ### Running the Daemon
 
@@ -54,8 +100,10 @@ chimera dashboard
 ```
 chimera-daemon/
 ├── src/chimera/
+│   ├── _bootstrap.py       # Windows bootstrap (sets event loop policy)
 │   ├── daemon.py           # Main orchestrator
-│   ├── cli.py              # CLI commands (Typer)
+│   ├── cli.py              # CLI commands (Click)
+│   ├── shell.py            # Interactive shell (spawns via bootstrap)
 │   ├── config.py           # Configuration management
 │   ├── queue.py            # Job queue (SQLite)
 │   ├── watcher.py          # File system watcher
@@ -83,6 +131,9 @@ chimera-daemon/
 │   └── api/
 │       ├── server.py       # FastAPI app
 │       └── routes/         # API endpoints
+├── scripts/
+│   ├── wsl-setup.sh        # WSL environment setup
+│   └── chimera-wsl.bat     # Windows→WSL launcher
 ├── tests/                  # Test suite
 ├── usb-package/            # Standalone USB excavator
 └── pyproject.toml          # Project configuration
@@ -200,33 +251,50 @@ asyncio.create_task(async_function())  # RuntimeError!
 
 ### Windows Compatibility
 
-When writing code that runs on Windows:
+CHIMERA uses a **bootstrap architecture** for Windows compatibility. The key insight: event loop policy must be set BEFORE any imports that might touch asyncio.
+
+**The Bootstrap Pattern:**
 
 ```python
-# GOOD: Set event loop policy at the VERY TOP of entry point files (cli.py, shell.py)
-# This MUST be before any other imports that might use asyncio
+# src/chimera/_bootstrap.py - This is the correct approach
 import sys
 if sys.platform == "win32":
     import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# Then continue with other imports
-import json
-from pathlib import Path
-# ...
+# NOW safe to import heavy dependencies
+from chimera.cli import main as cli_main
+cli_main()
+```
 
-# BAD: Setting policy later (e.g., before uvicorn.run()) - too late!
-# Other modules may have already imported asyncio and created event loops
+**Why This Works:**
+- When shell.py spawns a subprocess with `python -m chimera._bootstrap serve --dev`
+- Python loads `_bootstrap.py` first
+- Event loop policy is set BEFORE chromadb/spacy/sentence-transformers load
+- No race condition with import order
+
+**Common Mistakes:**
+
+```python
+# BAD: Setting policy at top of cli.py - NOT sufficient for subprocess spawning
+# cli.py
+import sys
+if sys.platform == "win32":
+    import asyncio
+    asyncio.set_event_loop_policy(...)  # May be too late if spawned differently
+
+# BAD: Setting policy before uvicorn.run() - definitely too late
 def run_server():
-    asyncio.set_event_loop_policy(...)  # TOO LATE - crash still happens
+    asyncio.set_event_loop_policy(...)  # C extensions already loaded!
     uvicorn.run(app)
 ```
 
-Key Windows considerations:
-- **Event Loop**: Set `WindowsSelectorEventLoopPolicy` at module load time (top of file)
-- **Entry Points**: Fix must be in CLI entry points (`cli.py`, `shell.py`), not just `daemon.py`
-- **Socket Cleanup**: Use single `httpx.Client` instance to prevent socket exhaustion
-- **Startup Timing**: Add delays before polling newly spawned subprocesses
+**Key Windows Considerations:**
+- **Bootstrap Architecture**: Shell spawns `chimera._bootstrap` not `chimera.cli`
+- **Event Loop**: `WindowsSelectorEventLoopPolicy` required for C extensions (ChromaDB)
+- **Socket Cleanup**: Use single `httpx.Client` instance to prevent exhaustion
+- **Startup Timing**: 3-second delay before polling newly spawned subprocess
+- **WSL Alternative**: For maximum reliability, run in WSL (see setup instructions)
 
 ## Pull Request Process
 
@@ -311,12 +379,15 @@ rm ~/.chimera/*.db-shm
 If the daemon crashes with exit code 3221225477 on Windows:
 - This is a memory access violation (0xC0000005)
 - Caused by ProactorEventLoop + C extensions (ChromaDB/hnswlib)
-- **Solution**: Set `WindowsSelectorEventLoopPolicy` at the VERY TOP of entry point files (`cli.py`, `shell.py`) - before any other imports
-- **Note**: Setting the policy in `daemon.py` before `uvicorn.run()` is NOT sufficient
+- **Solution**: Use the bootstrap architecture (`_bootstrap.py`)
+- Shell spawns `python -m chimera._bootstrap` to guarantee policy is set first
+- **Note**: Setting the policy in `cli.py` or `daemon.py` is NOT sufficient for subprocess spawning
 
 If you see `WinError 10054` (connection reset):
 - Caused by socket pool exhaustion from rapid connection attempts
 - **Solution**: Use single `httpx.Client` instance, add startup delays
+
+**Recommended**: For development on Windows, use WSL to avoid these issues entirely.
 
 ### Import Errors
 
