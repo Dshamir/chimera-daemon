@@ -219,6 +219,15 @@ Or use the Windows launcher:
 scripts\chimera-wsl.bat serve --dev
 ```
 
+**Important - WSL Data Path:**
+
+WSL uses `~/.chimera` (Linux path) for data. If you have existing data from Windows native mode at `C:\Users\YourName\.chimera`, the setup script will automatically create a symlink. If you need to do this manually:
+
+```bash
+# Link WSL path to existing Windows data
+ln -s /mnt/c/Users/YourName/.chimera ~/.chimera
+```
+
 **Note:** These are separate deployment options. The venv is for local development, Docker is for production, WSL is for Windows users who want Linux-native behavior. They are NOT nested.
 
 ## Troubleshooting
@@ -232,6 +241,7 @@ scripts\chimera-wsl.bat serve --dev
 | `Daemon not responding` | Heavy operation in progress - check `chimera dashboard` |
 | `Exit code 3221225477` (Windows) | Fixed in v0.1.0 - update to latest version |
 | `WinError 10054` (Windows) | Fixed in v0.1.0 - startup race condition resolved |
+| Dashboard shows all zeros (WSL) | Data path mismatch - run `ln -s /mnt/c/Users/YourName/.chimera ~/.chimera` |
 
 ### Windows-Specific Notes
 

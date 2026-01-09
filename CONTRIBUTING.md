@@ -57,6 +57,15 @@ Alternatively, use the Windows launcher:
 scripts\chimera-wsl.bat --help
 ```
 
+**Important - WSL Data Path:**
+
+The setup script automatically symlinks `~/.chimera` to your Windows data directory if it exists. If you need to do this manually (e.g., dashboard shows all zeros):
+
+```bash
+# Link to existing Windows data
+ln -s /mnt/c/Users/YourName/.chimera ~/.chimera
+```
+
 ### Setting Up (Windows Native)
 
 If you must use Windows natively:

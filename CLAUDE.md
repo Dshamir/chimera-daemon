@@ -695,6 +695,25 @@ Created `tests/test_multimedia.py` with integration tests for:
 - Pipeline multimedia storage methods
 - Error handling (fail fast, not silent)
 
+### 2026-01-09 — WSL Data Path Fix
+
+#### Issue 12: Dashboard Shows All Zeros in WSL
+
+**Symptom:** Dashboard running in WSL shows Files: 0, Chunks: 0, Entities: 0 despite daemon running. Debug logs show repeated "Catalog database initialized" messages.
+
+**Root Cause:** WSL uses Linux home directory (`~/.chimera` = `/home/user/.chimera`) but existing data is stored at Windows path (`C:\Users\UserName\.chimera`).
+
+**Fix:** Updated `scripts/wsl-setup.sh` to automatically detect and symlink Windows data:
+```bash
+# Automatically creates symlink if Windows data exists
+ln -s /mnt/c/Users/YourName/.chimera ~/.chimera
+```
+
+**Files Modified:**
+- `scripts/wsl-setup.sh` — Auto-detect Windows data and create symlink
+- `README.md` — Added WSL data path documentation
+- `CLAUDE.md` — Added troubleshooting entry
+
 ### 2026-01-07 — PR #1 Multimedia Extraction Pipeline Merge
 
 Merged `usb-excavator` branch into main, combining:
@@ -820,6 +839,8 @@ All daemon responsiveness fixes preserved:
 | `Connection refused :7777` | Daemon not running | Start with `chimera serve --dev` |
 | `Exit code 3221225477` | Windows ProactorEventLoop + C extensions | Fixed in Sprint 5 (WindowsSelectorEventLoopPolicy) |
 | `WinError 10054` | Windows socket reset during startup | Fixed in Sprint 5 (startup race condition) |
+| Dashboard shows all zeros (WSL) | Data path mismatch | Symlink Windows data: `ln -s /mnt/c/Users/YourName/.chimera ~/.chimera` |
+| Repeated "Catalog database initialized" | Fresh DB on each request | Same as above - data path mismatch |
 
 ### Health Check Troubleshooting
 

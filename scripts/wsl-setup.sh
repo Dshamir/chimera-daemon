@@ -51,6 +51,29 @@ pip install -e ".[dev]" -q
 echo ""
 echo "Setup complete!"
 echo ""
+
+# Check for existing Windows data and create symlink
+WINDOWS_USER=$(cmd.exe /c "echo %USERNAME%" 2>/dev/null | tr -d '\r')
+WINDOWS_DATA="/mnt/c/Users/$WINDOWS_USER/.chimera"
+
+if [ -d "$WINDOWS_DATA" ] && [ ! -e "$HOME/.chimera" ]; then
+    echo "[*] Found existing CHIMERA data at: $WINDOWS_DATA"
+    echo "[*] Creating symlink: ~/.chimera -> $WINDOWS_DATA"
+    ln -s "$WINDOWS_DATA" "$HOME/.chimera"
+    echo "[*] Symlink created! Your existing data will be used."
+    echo ""
+elif [ -d "$WINDOWS_DATA" ] && [ -L "$HOME/.chimera" ]; then
+    echo "[*] Symlink already exists: ~/.chimera -> $(readlink $HOME/.chimera)"
+    echo ""
+elif [ -d "$HOME/.chimera" ]; then
+    echo "[*] Using existing WSL data at: ~/.chimera"
+    echo ""
+else
+    echo "[*] No existing data found. Fresh installation."
+    echo "[*] Data will be stored at: ~/.chimera"
+    echo ""
+fi
+
 echo "To activate the environment:"
 echo "  source $VENV_DIR/bin/activate"
 echo ""
