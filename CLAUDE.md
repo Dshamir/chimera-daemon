@@ -730,6 +730,42 @@ chimera serve --dev
 - `scripts/wsl-setup.sh` — Auto-detect Windows data and create symlink (for fresh installs)
 - `CLAUDE.md` — Added manual fix instructions
 
+#### Issue 13: Dashboard Timeout on Large Databases
+
+**Symptom:** Dashboard shows "nothing" or fails to connect despite daemon running and healthy. The telemetry endpoint works via curl but httpx times out.
+
+**Root Cause:** The `/api/v1/telemetry` endpoint takes 10+ seconds on large databases (59K files, 6.6M entities) due to:
+1. Multiple CatalogDB instances being created (each opens new SQLite connection)
+2. Cross-filesystem access (WSL accessing Windows data via symlink)
+3. Default httpx timeout was only 5 seconds
+
+**Fix:**
+1. Increased `api_request` timeout from 5s to 15s in `telemetry.py`
+2. Optimized telemetry endpoint to use single database connection:
+   - Reuses daemon's catalog instance instead of creating new CatalogDB
+   - Combines all queries in one connection
+   - Builds status dict directly from daemon attributes
+   - Reduced nvidia-smi timeout from 5s to 2s
+
+**Files Modified:**
+- `src/chimera/telemetry.py` — Increased timeout to 15s
+- `src/chimera/api/routes/control.py` — Optimized single-connection queries
+
+**Verification:**
+```bash
+# Test telemetry endpoint response time
+time curl -s http://127.0.0.1:7777/api/v1/telemetry | head -c 100
+
+# Test dashboard fetch
+python -c "
+from chimera.telemetry import TelemetryDashboard
+d = TelemetryDashboard()
+d.fetch_status()
+print('Connected:', d.state.connected)
+print('Files:', d.state.total_files)
+"
+```
+
 ### 2026-01-07 — PR #1 Multimedia Extraction Pipeline Merge
 
 Merged `usb-excavator` branch into main, combining:
@@ -857,6 +893,7 @@ All daemon responsiveness fixes preserved:
 | `WinError 10054` | Windows socket reset during startup | Fixed in Sprint 5 (startup race condition) |
 | Dashboard shows all zeros (WSL) | Data path mismatch | Symlink Windows data: `ln -s /mnt/c/Users/YourName/.chimera ~/.chimera` |
 | Repeated "Catalog database initialized" | Fresh DB on each request | Same as above - data path mismatch |
+| Dashboard shows nothing/blank | Telemetry endpoint timeout | Fixed: timeout increased to 15s, endpoint optimized |
 
 ### Health Check Troubleshooting
 

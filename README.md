@@ -254,6 +254,7 @@ chimera serve --dev
 | `Exit code 3221225477` (Windows) | Fixed in v0.1.0 - update to latest version |
 | `WinError 10054` (Windows) | Fixed in v0.1.0 - startup race condition resolved |
 | Dashboard shows all zeros (WSL) | Data path mismatch - run `ln -s /mnt/c/Users/YourName/.chimera ~/.chimera` |
+| Dashboard shows nothing/blank | Fixed in v0.1.0 - telemetry timeout increased, endpoint optimized |
 
 ### Windows-Specific Notes
 
